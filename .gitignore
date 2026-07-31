@@ -1,0 +1,7 @@
+/target/
+/.cargo/config.toml
+/*.rfplugin/
+*.dls
+*.DLS
+*.wav
+*.WAV

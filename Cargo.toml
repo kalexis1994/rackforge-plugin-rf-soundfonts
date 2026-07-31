@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rf-dls-engine",
+    "plugin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/kalexis1994/rackforge-plugin-rf-dls"
+
+[workspace.dependencies]
+anyhow = "1.0"
+hound = "3.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+# RackForge's portable SDK crates are pinned to the exact host revision used
+# to build this release. Contributors can override them with the adjacent
+# local checkout through `.cargo/config.toml`; see `.cargo/config.toml.example`.
+rackforge-dsp = { git = "https://github.com/kalexis1994/rackforge.git", rev = "136960b3dd7748865b6a0a3d43af9c69bbcdea16" }
+rackforge-plugin-api = { git = "https://github.com/kalexis1994/rackforge.git", rev = "136960b3dd7748865b6a0a3d43af9c69bbcdea16" }

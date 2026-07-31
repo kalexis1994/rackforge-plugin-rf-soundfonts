@@ -1,0 +1,17 @@
+[package]
+name = "rackforge-rf-dls"
+description = "RackForge instrument plugin for user-provided DLS sound banks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rackforge-dsp.workspace = true
+rackforge-plugin-api.workspace = true
+rf-dls = { path = "../crates/rf-dls-engine" }
+serde.workspace = true
+serde_json.workspace = true

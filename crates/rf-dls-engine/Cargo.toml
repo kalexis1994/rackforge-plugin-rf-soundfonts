@@ -1,0 +1,29 @@
+[package]
+name = "rf-dls"
+description = "Generic DLS Level 1/2 sample engine used by the RackForge RF-DLS plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+hound.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa = "0.10"
+libc = "0.2"
+midir = "0.11"
+
+[lib]
+name = "rf_dls"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rf-dls"
+path = "src/main.rs"
+
+[[bin]]
+name = "rf-dls-live"
+path = "src/bin/rf_dls_live.rs"
