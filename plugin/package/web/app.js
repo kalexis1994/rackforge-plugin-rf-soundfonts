@@ -15,14 +15,233 @@
   let localProgramName = null;
   let discardPrompt = false;
   let bridgeError = "";
+  let activeEditorPage = "layer-a";
+  let focusProgramName = false;
   const localFieldValues = new Map();
   const previewTimers = new Map();
+  const editorVisuals = new Map();
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
     if (className) element.className = className;
     if (text !== undefined) element.textContent = text;
     return element;
+  }
+
+  function svgNode(tag, attributes = {}) {
+    const element = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    Object.entries(attributes).forEach(([name, value]) =>
+      element.setAttribute(name, String(value)),
+    );
+    return element;
+  }
+
+  function visualField(page, suffix) {
+    return (page.fields ?? []).find((field) => field.id.endsWith(suffix));
+  }
+
+  function visualNumber(field, fallback) {
+    if (!field) return { value: fallback, inherited: true, label: "N/A" };
+    const value = displayedFieldValue(field);
+    if (value.type === "inherited") {
+      return { value: fallback, inherited: true, label: "INHERITED" };
+    }
+    if (value.type !== "integer") {
+      return { value: fallback, inherited: true, label: "N/A" };
+    }
+    const decimals = field.kind.decimals ?? 0;
+    return {
+      value: value.value / 10 ** decimals,
+      inherited: false,
+      label: valueText(value, field.kind),
+    };
+  }
+
+  function registerVisual(page, element, update) {
+    editorVisuals.set(page.id, {
+      fieldIds: (page.fields ?? []).map((field) => field.id),
+      update,
+    });
+    update();
+    return element;
+  }
+
+  function updateFieldVisual(fieldId) {
+    editorVisuals.forEach((visual) => {
+      if (visual.fieldIds.includes(fieldId)) visual.update();
+    });
+  }
+
+  function renderEnvelopeVisual(page) {
+    const panel = node("div", "parameter-visual envelope-visual");
+    const header = node("div", "visual-header");
+    header.append(
+      node("div", "visual-title", page.id.includes("pitch") ? "PITCH ENVELOPE" : "AMPLITUDE ENVELOPE"),
+      node("span", "visual-live", "LIVE PREVIEW"),
+    );
+    const svg = svgNode("svg", {
+      viewBox: "0 0 720 230",
+      role: "img",
+      "aria-label": `${page.label} envelope graph`,
+      preserveAspectRatio: "none",
+    });
+    const values = node("div", "visual-values");
+    panel.append(header, svg, values);
+
+    const draw = () => {
+      const attack = visualNumber(visualField(page, ".attack"), 0.12);
+      const decay = visualNumber(visualField(page, ".decay"), 0.35);
+      const sustain = visualNumber(visualField(page, ".sustain"), 0.72);
+      const release = visualNumber(visualField(page, ".release"), 0.55);
+      const phaseWidth = (seconds) => 34 + Math.log1p(Math.max(0, seconds)) / Math.log(61) * 118;
+      let attackWidth = phaseWidth(attack.value);
+      let decayWidth = phaseWidth(decay.value);
+      let releaseWidth = phaseWidth(release.value);
+      const available = 570;
+      const total = attackWidth + decayWidth + releaseWidth;
+      if (total > available) {
+        const scale = available / total;
+        attackWidth *= scale;
+        decayWidth *= scale;
+        releaseWidth *= scale;
+      }
+      const left = 44;
+      const top = 28;
+      const bottom = 188;
+      const attackX = left + attackWidth;
+      const decayX = attackX + decayWidth;
+      const releaseX = 676;
+      const sustainX = releaseX - releaseWidth;
+      const sustainY = top + (1 - Math.max(0, Math.min(1, sustain.value))) * (bottom - top);
+      svg.replaceChildren();
+      [0, 0.25, 0.5, 0.75, 1].forEach((step) => {
+        svg.append(
+          svgNode("line", {
+            x1: left,
+            y1: top + step * (bottom - top),
+            x2: releaseX,
+            y2: top + step * (bottom - top),
+            class: "visual-grid-line",
+          }),
+        );
+      });
+      const phases = [
+        [left, bottom, attackX, top, attack.inherited],
+        [attackX, top, decayX, sustainY, decay.inherited],
+        [decayX, sustainY, sustainX, sustainY, sustain.inherited],
+        [sustainX, sustainY, releaseX, bottom, release.inherited],
+      ];
+      phases.forEach(([x1, y1, x2, y2, inherited]) =>
+        svg.append(
+          svgNode("line", {
+            x1,
+            y1,
+            x2,
+            y2,
+            class: `envelope-phase${inherited ? " inherited" : ""}`,
+          }),
+        ),
+      );
+      [
+        [left, bottom],
+        [attackX, top],
+        [decayX, sustainY],
+        [sustainX, sustainY],
+        [releaseX, bottom],
+      ].forEach(([cx, cy]) =>
+        svg.append(svgNode("circle", { cx, cy, r: 6, class: "envelope-point" })),
+      );
+      values.replaceChildren();
+      [
+        ["A", attack],
+        ["D", decay],
+        ["S", sustain],
+        ["R", release],
+      ].forEach(([label, item]) => {
+        const chip = node("div", `visual-value${item.inherited ? " inherited" : ""}`);
+        chip.append(node("span", "", label), node("strong", "", item.label));
+        values.append(chip);
+      });
+    };
+    return registerVisual(page, panel, draw);
+  }
+
+  function renderLfoVisual(page) {
+    const panel = node("div", "parameter-visual lfo-visual");
+    const header = node("div", "visual-header");
+    header.append(node("div", "visual-title", "MODULATION SHAPE"), node("span", "visual-live", "LFO"));
+    const svg = svgNode("svg", {
+      viewBox: "0 0 720 190",
+      role: "img",
+      "aria-label": "LFO modulation graph",
+      preserveAspectRatio: "none",
+    });
+    const values = node("div", "visual-values compact");
+    panel.append(header, svg, values);
+    const draw = () => {
+      const rate = visualNumber(visualField(page, ".frequency"), 5);
+      const delay = visualNumber(visualField(page, ".delay"), 0);
+      const pitch = visualNumber(visualField(page, ".pitch"), 0);
+      const modPitch = visualNumber(visualField(page, ".mod-pitch"), 50);
+      const left = 44;
+      const right = 676;
+      const center = 94;
+      const delayX = left + Math.min(0.38, Math.max(0, delay.value) / 12) * (right - left);
+      const cycles = 1.5 + Math.min(7.5, Math.max(0.01, rate.value) * 0.8);
+      const amplitude = 28 + Math.min(48, Math.max(Math.abs(pitch.value), Math.abs(modPitch.value)) / 50);
+      let path = `M ${left} ${center} L ${delayX} ${center}`;
+      const samples = 120;
+      for (let index = 0; index <= samples; index += 1) {
+        const progress = index / samples;
+        const x = delayX + progress * (right - delayX);
+        const y = center - Math.sin(progress * cycles * Math.PI * 2) * amplitude;
+        path += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
+      }
+      svg.replaceChildren(
+        svgNode("line", { x1: left, y1: center, x2: right, y2: center, class: "visual-axis" }),
+        svgNode("line", { x1: delayX, y1: 20, x2: delayX, y2: 168, class: "delay-marker" }),
+        svgNode("path", {
+          d: path,
+          class: `lfo-wave${rate.inherited ? " inherited" : ""}`,
+          fill: "none",
+        }),
+      );
+      values.replaceChildren();
+      [["RATE", rate], ["DELAY", delay], ["PITCH", pitch], ["WHEEL", modPitch]].forEach(([label, item]) => {
+        const chip = node("div", `visual-value${item.inherited ? " inherited" : ""}`);
+        chip.append(node("span", "", label), node("strong", "", item.label));
+        values.append(chip);
+      });
+    };
+    return registerVisual(page, panel, draw);
+  }
+
+  function renderRangeVisual(page) {
+    const panel = node("div", "parameter-visual range-visual");
+    const header = node("div", "visual-header");
+    header.append(node("div", "visual-title", "PERFORMANCE ZONES"), node("span", "visual-live", "MIDI 0–127"));
+    const lanes = node("div", "range-lanes");
+    panel.append(header, lanes);
+    const draw = () => {
+      const keyLow = visualNumber(visualField(page, ".key-low"), 0);
+      const keyHigh = visualNumber(visualField(page, ".key-high"), 127);
+      const velLow = visualNumber(visualField(page, ".vel-low"), 0);
+      const velHigh = visualNumber(visualField(page, ".vel-high"), 127);
+      lanes.replaceChildren();
+      [["KEY", keyLow, keyHigh], ["VELOCITY", velLow, velHigh]].forEach(([label, low, high]) => {
+        const row = node("div", "range-lane");
+        const copy = node("div", "range-lane-copy");
+        copy.append(node("span", "", label), node("strong", "", `${Math.round(low.value)} – ${Math.round(high.value)}`));
+        const track = node("div", "range-lane-track");
+        const fill = node("i");
+        fill.style.left = `${Math.max(0, Math.min(100, low.value / 127 * 100))}%`;
+        fill.style.right = `${Math.max(0, Math.min(100, (127 - high.value) / 127 * 100))}%`;
+        track.append(fill);
+        row.append(copy, track);
+        lanes.append(row);
+      });
+    };
+    return registerVisual(page, panel, draw);
   }
 
   function request(method, params) {
@@ -54,6 +273,7 @@
 
   function editField(draft, field, value, preview) {
     localFieldValues.set(field.id, value);
+    updateFieldVisual(field.id);
     request("plugin.edit_program_field", {
       draft_id: draft.draft_id,
       field_id: field.id,
@@ -64,6 +284,7 @@
 
   function previewField(draft, field, value) {
     localFieldValues.set(field.id, value);
+    updateFieldVisual(field.id);
     const existing = previewTimers.get(field.id);
     if (existing) window.clearTimeout(existing);
     previewTimers.set(
@@ -392,6 +613,7 @@
     range.step = String(field.kind.step);
     range.value = String(rawValue);
     range.disabled = disabled || inherited;
+    range.setAttribute("aria-label", field.label);
     const output = node(
       "output",
       "",
@@ -401,7 +623,10 @@
       const next = { type: "integer", value: Number(range.value) };
       output.textContent = valueText(next, field.kind);
       if (field.live_preview) previewField(draft, field, next);
-      else localFieldValues.set(field.id, next);
+      else {
+        localFieldValues.set(field.id, next);
+        updateFieldVisual(field.id);
+      }
     });
     range.addEventListener("change", () =>
       commitField(draft, field, {
@@ -417,6 +642,7 @@
   function renderChoiceField(draft, field, value, disabled) {
     const select = node("select", "choice-field");
     select.disabled = disabled;
+    select.setAttribute("aria-label", field.label);
     field.kind.options.forEach((option) => {
       const element = node("option", "", option.label);
       element.value = option.value;
@@ -435,6 +661,7 @@
   function renderSoundField(draft, field, value, disabled, instance) {
     const select = node("select", "choice-field sound-field");
     select.disabled = disabled;
+    select.setAttribute("aria-label", field.label);
     const sounds = instance.sounds.filter(
       (sound) =>
         !field.kind.bank ||
@@ -507,6 +734,14 @@
     );
     section.append(heading);
 
+    if (page.id.endsWith(".amp-env") || page.id.endsWith(".pitch-env")) {
+      section.append(renderEnvelopeVisual(page));
+    } else if (page.id.endsWith(".lfo")) {
+      section.append(renderLfoVisual(page));
+    } else if (page.id.endsWith(".range")) {
+      section.append(renderRangeVisual(page));
+    }
+
     const fields = node("div", "editor-fields");
     (page.fields ?? []).forEach((field) =>
       fields.append(
@@ -548,6 +783,8 @@
       localFieldValues.clear();
       discardPrompt = false;
       bridgeError = "";
+      activeEditorPage = draft.editor.pages[0]?.id ?? "layer-a";
+      focusProgramName = false;
     }
     if (localProgramName === draft.name) localProgramName = null;
 
@@ -561,15 +798,33 @@
     nameInput.readOnly = !editMode;
     nameInput.className = editMode ? "" : "locked";
     nameInput.setAttribute("aria-label", "Program name");
+    const nameError = node("small", "program-name-error");
     const saveName = () => {
       const name = nameInput.value.trim();
-      if (!name || name === draft.name) return;
+      if (!name) {
+        nameError.textContent = "A program name is required.";
+        nameInput.setAttribute("aria-invalid", "true");
+        return false;
+      }
+      if (!/^[\x20-\x7e]+$/.test(name)) {
+        nameError.textContent = "Use printable ASCII characters only.";
+        nameInput.setAttribute("aria-invalid", "true");
+        return false;
+      }
+      nameError.textContent = "";
+      nameInput.removeAttribute("aria-invalid");
+      if (name === draft.name) return true;
       localProgramName = name;
       request("plugin.set_program_name", {
         draft_id: draft.draft_id,
         name,
       });
+      return true;
     };
+    nameInput.addEventListener("input", () => {
+      nameError.textContent = "";
+      nameInput.removeAttribute("aria-invalid");
+    });
     nameInput.addEventListener("change", saveName);
     nameInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -577,7 +832,19 @@
         nameInput.blur();
       }
     });
-    nameGroup.append(nameInput);
+    const nameRow = node("div", "program-name-row");
+    nameRow.append(nameInput);
+    if (!editMode) {
+      const rename = node("button", "rename-program-button", "✎ RENAME");
+      rename.type = "button";
+      rename.addEventListener("click", () => {
+        editMode = true;
+        focusProgramName = true;
+        renderProgramEditor(instance, draft);
+      });
+      nameRow.append(rename);
+    }
+    nameGroup.append(nameRow, nameError);
 
     const actions = node("div", "editor-actions");
     const editToggle = node(
@@ -616,7 +883,7 @@
     const save = node("button", "editor-primary", "SAVE PROGRAM");
     save.type = "button";
     save.addEventListener("click", () => {
-      saveName();
+      if (!saveName()) return;
       request("plugin.save_program", { draft_id: draft.draft_id });
     });
     actions.append(editToggle, status, cancel, save);
@@ -651,14 +918,63 @@
       root.append(node("p", "bridge-error", bridgeError));
     }
 
-    const pages = node(
+    editorVisuals.clear();
+    const workspace = node(
       "div",
-      `program-editor-pages${editMode ? "" : " locked"}`,
+      `program-editor-workspace${editMode ? "" : " locked"}`,
     );
-    draft.editor.pages.forEach((page) =>
-      pages.append(renderEditorPage(draft, page, instance, true, editMode)),
-    );
-    root.append(pages);
+    const navigation = node("nav", "editor-page-navigation");
+    navigation.setAttribute("aria-label", "Program editor sections");
+    const currentPage =
+      draft.editor.pages.find((page) => page.id === activeEditorPage) ??
+      draft.editor.pages[0];
+    if (currentPage) activeEditorPage = currentPage.id;
+    draft.editor.pages.forEach((page) => {
+      const button = node(
+        "button",
+        `editor-page-button${page.id === activeEditorPage ? " active" : ""}${page.enabled ? "" : " disabled"}`,
+      );
+      button.type = "button";
+      button.append(
+        node("span", "editor-page-mark", page.label.slice(0, 2)),
+        node("strong", "", page.label),
+        node("small", "", page.detail),
+      );
+      button.addEventListener("click", () => {
+        activeEditorPage = page.id;
+        renderProgramEditor(instance, draft);
+      });
+      navigation.append(button);
+    });
+    const pages = node("div", "program-editor-pages");
+    if (currentPage) {
+      const pageIntro = node("header", "active-page-intro");
+      const introCopy = node("div");
+      introCopy.append(
+        node("span", "eyebrow", "PROGRAM SECTION"),
+        node("h2", "", currentPage.label),
+        node("p", "", currentPage.detail),
+      );
+      const editState = node(
+        "span",
+        `page-edit-state${editMode ? " active" : ""}`,
+        editMode ? "EDITING LIVE" : "READ ONLY",
+      );
+      pageIntro.append(introCopy, editState);
+      pages.append(
+        pageIntro,
+        renderEditorPage(draft, currentPage, instance, true, editMode),
+      );
+    }
+    workspace.append(navigation, pages);
+    root.append(workspace);
+    if (focusProgramName) {
+      focusProgramName = false;
+      window.requestAnimationFrame(() => {
+        nameInput.focus();
+        nameInput.select();
+      });
+    }
   }
 
   function renderConfig(instance) {
@@ -670,6 +986,7 @@
       localProgramName = null;
       localFieldValues.clear();
       discardPrompt = false;
+      editorVisuals.clear();
       renderConfigLibrary(instance);
     }
   }

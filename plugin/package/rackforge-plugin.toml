@@ -4,7 +4,7 @@ name = "RF-DLS"
 vendor = "RackForge"
 version = "0.1.0"
 kind = "instrument"
-state_version = 2
+state_version = 3
 capabilities = [
     "audio_output",
     "midi_input",
@@ -13,6 +13,7 @@ capabilities = [
     "sample_accurate_automation",
 ]
 ui_layouts = ["little@1"]
+config_mode = true
 
 [midi]
 channel_model = "single_part"

@@ -1,7 +1,7 @@
 mod custom_program;
 mod program_editor;
 
-use custom_program::{CustomProgram, DlsSource, ProgramLayer, SharedEffects};
+use custom_program::{CustomProgram, CustomProgramPayload, DlsSource, ProgramLayer, SharedEffects};
 use rackforge_dsp::{Chorus, Exciter, Reverb, StereoFrame};
 use rackforge_plugin_api::abi::{
     HostApiV1, LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_WARN, MidiEventV1,
@@ -16,6 +16,7 @@ use rackforge_plugin_api::{
     SurfaceActivationResponse,
 };
 use rf_dls::{DlsBank, Voice};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -34,7 +35,7 @@ const RUNTIME_DESCRIPTOR: &[u8] = br#"{
   "schema_version": 1,
   "id": "org.rackforge.rf-dls",
   "version": "0.1.0",
-  "state_version": 2
+  "state_version": 3
 }"#;
 
 const PARAMETER_SCHEMA: &[u8] = br#"{
@@ -948,14 +949,31 @@ unsafe extern "C" fn get_parameter(
     STATUS_OK
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SavedStateV3 {
+    schema_version: u32,
+    master_gain: f32,
+    selected_preset_id: String,
+    active_program: CustomProgramPayload,
+}
+
 fn state_bytes(plugin: &RfDls) -> Vec<u8> {
-    let id = plugin.selected_preset_id.as_bytes();
-    let length = u16::try_from(id.len()).expect("validated preset IDs fit in u16");
-    let mut state = Vec::with_capacity(10 + id.len());
-    state.extend_from_slice(b"RFD2");
-    state.extend_from_slice(&plugin.master_gain.to_le_bytes());
-    state.extend_from_slice(&length.to_le_bytes());
-    state.extend_from_slice(id);
+    let snapshot = SavedStateV3 {
+        schema_version: 3,
+        master_gain: plugin.master_gain,
+        selected_preset_id: plugin.selected_preset_id.clone(),
+        active_program: CustomProgramPayload {
+            slot: 1,
+            gain: plugin.program_gain_target,
+            layers: plugin.active_layers.clone(),
+            effects: plugin.active_effects,
+        },
+    };
+    let payload = serde_json::to_vec(&snapshot).expect("validated RF-DLS state serializes");
+    let mut state = Vec::with_capacity(4 + payload.len());
+    state.extend_from_slice(b"RFD3");
+    state.extend_from_slice(&payload);
     state
 }
 
@@ -979,6 +997,45 @@ unsafe extern "C" fn load_state(instance: *mut c_void, source: *const u8, length
         return STATUS_INVALID_ARGUMENT;
     }
     let bytes = unsafe { slice::from_raw_parts(source, length) };
+    if &bytes[..4] == b"RFD3" {
+        let Ok(snapshot) = serde_json::from_slice::<SavedStateV3>(&bytes[4..]) else {
+            return STATUS_INVALID_ARGUMENT;
+        };
+        if snapshot.schema_version != 3
+            || snapshot.selected_preset_id.is_empty()
+            || snapshot.selected_preset_id.len() > 256
+        {
+            return STATUS_INVALID_STATE;
+        }
+        let program = CustomProgram {
+            id: "restored-state".into(),
+            name: "Restored state".into(),
+            category: None,
+            slot: snapshot.active_program.slot,
+            gain: snapshot.active_program.gain,
+            layers: snapshot.active_program.layers,
+            effects: snapshot.active_program.effects,
+        };
+        if program.validate().is_err() {
+            return STATUS_INVALID_STATE;
+        }
+        if program.layers.iter().any(|layer| {
+            plugin
+                .bank
+                .instrument(layer.source.bank, layer.source.program)
+                .is_none()
+        }) {
+            return STATUS_INVALID_STATE;
+        }
+        let status = plugin.set_parameter(MASTER_GAIN_PARAMETER, f64::from(snapshot.master_gain));
+        if status != STATUS_OK {
+            return status;
+        }
+        if !plugin.activate_custom_program(program, &snapshot.selected_preset_id, true) {
+            return STATUS_INVALID_STATE;
+        }
+        return STATUS_OK;
+    }
     let (gain, selected) = if &bytes[..4] == b"RFD1" && length == LEGACY_STATE_SIZE {
         let gain = f32::from_le_bytes(bytes[4..8].try_into().expect("fixed slice"));
         let bank = u32::from_le_bytes(bytes[8..12].try_into().expect("fixed slice"));
@@ -997,6 +1054,9 @@ unsafe extern "C" fn load_state(instance: *mut c_void, source: *const u8, length
     } else {
         return STATUS_INVALID_ARGUMENT;
     };
+    if !plugin.has_preset(&selected) {
+        return STATUS_INVALID_STATE;
+    }
     let status = plugin.set_parameter(MASTER_GAIN_PARAMETER, f64::from(gain));
     if status != STATUS_OK {
         return status;
@@ -1797,8 +1857,15 @@ mod tests {
     fn state_round_trip_preserves_gain_and_program() {
         let mut plugin = synthetic_plugin();
         plugin.master_gain = 0.25;
+        let mut program = custom_program();
+        program.gain = 0.72;
+        program.layers[0].parameters.transpose_semitones = 7;
+        program.effects.chorus.enabled = true;
+        program.effects.chorus.mix = 0.33;
+        assert!(plugin.apply_custom_program(program, "preview.unsaved"));
         let state = state_bytes(&plugin);
         plugin.master_gain = 1.0;
+        assert!(plugin.select_instrument(0, 0));
         let status = unsafe {
             load_state(
                 (&mut plugin as *mut RfDls).cast(),
@@ -1808,5 +1875,10 @@ mod tests {
         };
         assert_eq!(status, STATUS_OK);
         assert_eq!(plugin.master_gain, 0.25);
+        assert_eq!(plugin.selected_preset_id, "preview.unsaved");
+        assert_eq!(plugin.program_gain_target, 0.72);
+        assert_eq!(plugin.active_layers[0].parameters.transpose_semitones, 7);
+        assert!(plugin.active_effects.chorus.enabled);
+        assert_eq!(plugin.active_effects.chorus.mix, 0.33);
     }
 }

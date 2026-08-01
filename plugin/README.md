@@ -14,8 +14,8 @@ recurso obligatorio `dls-bank`.
 - Salida: estéreo; sin FX conserva la señal mono original en ambos canales
 - Banco inicial: General MIDI bank 0, program 0
 - Preset inicial: `gm.piano-1`
-- Estado v2: volumen e ID estable del programa seleccionado; sigue leyendo el
-  estado v1 basado en banco/programa
+- Estado v3: captura opaca completa de capas, envelopes, modulación, FX,
+  ganancias y contexto del programa activo; sigue leyendo estados v1/v2
 - Catálogo dinámico separado en `DLS` (solo lectura) y `CUSTOM`
 
 ## MIDI implementado
