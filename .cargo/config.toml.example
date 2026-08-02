@@ -3,8 +3,8 @@
 # ignored so release builds continue to use the pinned SDK revision.
 
 [patch."https://github.com/kalexis1994/rackforge.git"]
-rackforge-dsp = { path = "../rackforge/raspberry/runtime/rackforge-dsp" }
-rackforge-plugin-api = { path = "../rackforge/raspberry/runtime/rackforge-plugin-api" }
-rackforge-midi-api = { path = "../rackforge/raspberry/runtime/rackforge-midi-api" }
-rackforge-program-api = { path = "../rackforge/raspberry/runtime/rackforge-program-api" }
-rackforge-surface-api = { path = "../rackforge/raspberry/runtime/rackforge-surface-api" }
+rackforge-dsp = { path = "../rackforge/crates/rackforge-dsp" }
+rackforge-plugin-api = { path = "../rackforge/crates/rackforge-plugin-api" }
+rackforge-midi-api = { path = "../rackforge/crates/rackforge-midi-api" }
+rackforge-program-api = { path = "../rackforge/crates/rackforge-program-api" }
+rackforge-surface-api = { path = "../rackforge/crates/rackforge-surface-api" }
