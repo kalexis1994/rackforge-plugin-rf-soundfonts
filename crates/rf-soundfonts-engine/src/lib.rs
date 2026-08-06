@@ -1,3 +1,4 @@
+pub mod nki;
 pub mod smpl;
 pub mod streamer;
 pub mod spsc;

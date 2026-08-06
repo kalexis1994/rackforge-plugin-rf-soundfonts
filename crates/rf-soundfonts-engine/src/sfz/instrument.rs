@@ -81,7 +81,7 @@ pub struct CcGate {
 
 /// A region with its modulation intact.
 #[derive(Clone, Debug)]
-pub struct SfzRegion {
+pub struct SampledRegion {
     pub key_low: u8,
     pub key_high: u8,
     pub velocity_low: u8,
@@ -110,10 +110,10 @@ pub struct SfzRegion {
 
 /// A loaded SFZ instrument.
 #[derive(Debug)]
-pub struct SfzInstrument {
+pub struct SampledInstrument {
     pub name: String,
     pub samples: Vec<StreamedSample>,
-    pub regions: Vec<SfzRegion>,
+    pub regions: Vec<SampledRegion>,
     pub curves: BTreeMap<u32, Curve>,
     /// Controller values the document declares through `set_cc`/`set_hdcc`.
     pub defaults: CcState,
@@ -142,7 +142,7 @@ const REFERENCE_PEAK: f32 = 0.25;
 const MIN_NORMALISATION: f32 = 0.05;
 const MAX_NORMALISATION: f32 = 8.0;
 
-impl SfzInstrument {
+impl SampledInstrument {
     /// Reads and loads an instrument, decoding every sample it references.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SoundfontError> {
         let path = path.as_ref();
@@ -185,7 +185,7 @@ impl SfzInstrument {
         }
 
         let store = SampleStore::beside(root);
-        let samples = store.load_all(root, &default_path, &order)?;
+        let samples = store.load_all(root, &default_path, &order, &Default::default())?;
 
         let mut regions = Vec::new();
         for opcodes in &document.regions {
@@ -216,6 +216,10 @@ impl SfzInstrument {
     /// plucked or struck instrument reaches its peak. Each region's sample is
     /// weighted by the gain that region would actually apply, so a library
     /// that quietens a layer in its own settings is not treated as loud.
+    pub fn renormalise(&mut self) {
+        self.normalisation = self.measure_normalisation();
+    }
+
     fn measure_normalisation(&self) -> f32 {
         let curves = &self.curves;
         let mut peak = 0.0_f32;
@@ -307,7 +311,7 @@ impl SfzInstrument {
     }
 }
 
-impl SfzRegion {
+impl SampledRegion {
     /// Whether this region should sound for a key press.
     pub fn accepts(&self, note: u8, velocity: u8, cc: &CcState) -> bool {
         (self.key_low..=self.key_high).contains(&note)
@@ -392,7 +396,7 @@ fn control_defaults(control: &OpcodeMap) -> CcState {
     state
 }
 
-fn region_from(opcodes: &OpcodeMap, wave_index: usize, sample: &StreamedSample) -> SfzRegion {
+fn region_from(opcodes: &OpcodeMap, wave_index: usize, sample: &StreamedSample) -> SampledRegion {
     let number = |name: &str| opcodes.get(name).and_then(|value| value.parse::<f32>().ok());
     let key = |name: &str| opcodes.get(name).and_then(|value| parse_note(value));
 
@@ -405,7 +409,7 @@ fn region_from(opcodes: &OpcodeMap, wave_index: usize, sample: &StreamedSample) 
         None => (key_low, key_high, key_low),
     };
 
-    SfzRegion {
+    SampledRegion {
         key_low,
         key_high,
         velocity_low: number("lovel").unwrap_or(0.0) as u8,
@@ -865,7 +869,7 @@ mod tests {
             .and_then(|value| value.parse().ok())
             .unwrap_or(72);
         let rate = 48_000_u32;
-        let instrument = SfzInstrument::open(&path).unwrap();
+        let instrument = SampledInstrument::open(&path).unwrap();
         let streamer = Streamer::start();
         let mut voices = instrument
             .voices_for_note(note, 100, &instrument.defaults, rate, &streamer)
@@ -929,7 +933,7 @@ mod tests {
     fn loads_and_plays_a_real_library() {
         let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let started = std::time::Instant::now();
-        let instrument = SfzInstrument::open(&path).unwrap();
+        let instrument = SampledInstrument::open(&path).unwrap();
         let load = started.elapsed();
         let whole: usize = instrument
             .samples

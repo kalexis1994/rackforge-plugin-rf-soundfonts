@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rf_soundfonts::sfz::instrument::{CcState, SfzInstrument};
+use rf_soundfonts::sfz::instrument::{CcState, SampledInstrument};
 use rf_soundfonts::streamer::Streamer;
 use rf_soundfonts::Voice;
 
@@ -31,7 +31,7 @@ pub struct LoadedInstrument {
     pub name: String,
     /// Library this instrument came from, which groups it in the catalog.
     pub library: String,
-    pub instrument: SfzInstrument,
+    pub instrument: SampledInstrument,
     /// Live controller values, seeded from the document's own defaults.
     pub controllers: CcState,
 }
@@ -86,7 +86,7 @@ impl SfzLibrary {
         let mut instruments = Vec::new();
         let mut seen: BTreeMap<String, usize> = BTreeMap::new();
         for (library, path) in found {
-            match SfzInstrument::open(&path) {
+            match SampledInstrument::open(&path) {
                 Ok(instrument) => {
                     let name = instrument.name.clone();
                     let id = unique_id(&format!("{library} {name}"), &mut seen);

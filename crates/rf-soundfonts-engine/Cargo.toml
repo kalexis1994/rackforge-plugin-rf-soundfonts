@@ -9,7 +9,9 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 claxon = "0.4.3"
+flate2 = "1.1.9"
 hound.workspace = true
+quick-xml = "0.41.0"
 thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

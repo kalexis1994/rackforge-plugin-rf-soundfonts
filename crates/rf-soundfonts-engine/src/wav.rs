@@ -41,8 +41,19 @@ pub fn load_wave(path: impl AsRef<Path>) -> Result<Wave, SoundfontError> {
 
 /// Decodes WAV bytes already held in memory.
 pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
-    let reader = hound::WavReader::new(bytes)
-        .map_err(|error| SoundfontError::Invalid(format!("cannot read WAV {name:?}: {error}")))?;
+    let reader = match hound::WavReader::new(bytes) {
+        Ok(reader) => reader,
+        // Old exporters write a `fmt ` chunk of a size the specification does
+        // not list: one accordion sample here declares 20 bytes where 16, 18
+        // or 40 are expected, the extra four being zero. The audio is ordinary
+        // PCM and perfectly readable, so a lenient pass reads it rather than
+        // losing an instrument over four bytes of padding.
+        Err(strict) => {
+            return decode_plain_pcm(bytes, &name).ok_or_else(|| {
+                SoundfontError::Invalid(format!("cannot read WAV {name:?}: {strict}"))
+            });
+        }
+    };
     let spec = reader.spec();
     if spec.channels == 0 || spec.channels > MAX_CHANNELS {
         return Err(SoundfontError::Unsupported(format!(
@@ -114,6 +125,94 @@ fn decode_samples(
             "WAV {name:?} is {bits}-bit {format:?}"
         ))),
     }
+}
+
+/// Reads uncompressed PCM from a file a strict parser refused.
+///
+/// Deliberately narrow. It accepts only integer PCM, and reads the first
+/// sixteen bytes of `fmt `, which are fixed whatever size the chunk declares.
+/// Anything else is declined, so a genuinely broken file still fails rather
+/// than being interpreted into noise.
+fn decode_plain_pcm(bytes: &[u8], name: &str) -> Option<Wave> {
+    const HEADER: usize = 12;
+    const PCM: u16 = 1;
+
+    if bytes.len() < HEADER || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let word = |at: usize| -> Option<u16> {
+        bytes
+            .get(at..at + 2)
+            .and_then(|slice| slice.try_into().ok())
+            .map(u16::from_le_bytes)
+    };
+    let mut format: Option<(u16, u32, u16)> = None;
+    let mut audio: Option<&[u8]> = None;
+
+    let mut cursor = HEADER;
+    while cursor + 8 <= bytes.len() {
+        let id = &bytes[cursor..cursor + 4];
+        let size = u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().ok()?) as usize;
+        let body = cursor + 8;
+        let end = body.checked_add(size)?.min(bytes.len());
+        if id == b"fmt " && size >= 16 {
+            if word(body)? != PCM {
+                return None;
+            }
+            format = Some((
+                word(body + 2)?,
+                u32::from_le_bytes(bytes.get(body + 4..body + 8)?.try_into().ok()?),
+                word(body + 14)?,
+            ));
+        } else if id == b"data" {
+            audio = Some(&bytes[body..end]);
+        }
+        cursor = end + (size & 1);
+    }
+
+    let (channels, sample_rate, bits) = format?;
+    let data = audio?;
+    if channels == 0 || channels > MAX_CHANNELS || sample_rate == 0 {
+        return None;
+    }
+    if !matches!(bits, 8 | 16 | 24 | 32) {
+        return None;
+    }
+    let width = usize::from(bits) / 8;
+    let scale = 1.0_f32 / (1_i64 << (bits - 1)) as f32;
+    let samples: Vec<f32> = data
+        .chunks_exact(width)
+        .map(|raw| {
+            // Sign-extended from the file's width into i32, which is the same
+            // normalisation the strict path applies.
+            let mut value: i32 = 0;
+            for (index, byte) in raw.iter().enumerate() {
+                value |= i32::from(*byte) << (8 * index);
+            }
+            let shift = 32 - u32::from(bits);
+            ((value << shift) >> shift) as f32 * scale
+        })
+        .collect();
+    if samples.is_empty() || samples.len() % usize::from(channels) != 0 {
+        return None;
+    }
+    let frames = samples.len() / usize::from(channels);
+    let sample_loop =
+        read_smpl_loop(bytes).filter(|looping| looping.start < looping.end && looping.end <= frames);
+
+    Some(Wave {
+        name: name.to_string(),
+        sample_rate,
+        channels: channels as u8,
+        source_bits: bits,
+        samples: Arc::from(samples),
+        sample_params: sample_loop.map(|sample_loop| crate::SampleParams {
+            unity_note: 60,
+            fine_tune: 0,
+            attenuation_db: 0.0,
+            sample_loop: Some(sample_loop),
+        }),
+    })
 }
 
 /// Extracts the first sustaining loop from a `smpl` chunk, in frames.
@@ -225,6 +324,31 @@ mod tests {
         append_smpl(&mut bytes, 0, 99);
         let wave = decode(&bytes, "bad-loop".into()).unwrap();
         assert!(wave.sample_params.is_none(), "instrument was lost to metadata");
+    }
+
+    #[test]
+    fn an_unusual_fmt_chunk_size_is_read_rather_than_refused() {
+        // An accordion sample here declares a 20-byte `fmt ` chunk where the
+        // specification lists 16, 18 or 40. The four extra bytes are zero and
+        // the audio is ordinary PCM; a strict reader loses the instrument.
+        let mut bytes = write_wav(spec(1, 16, hound::SampleFormat::Int), &[0.5, -0.5]);
+        // Widen fmt from 16 to 20 bytes, inserting the padding it declares.
+        let size = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        assert_eq!(size, 16);
+        bytes[16..20].copy_from_slice(&20_u32.to_le_bytes());
+        bytes.splice(36..36, [0, 0, 0, 0]);
+        let total = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&total.to_le_bytes());
+
+        let wave = decode(&bytes, "odd-fmt".into()).unwrap();
+        assert_eq!(wave.channels, 1);
+        assert_eq!(wave.frame_count(), 2);
+        assert!((wave.samples[0] - 0.5).abs() < 1e-3, "{}", wave.samples[0]);
+    }
+
+    #[test]
+    fn genuinely_broken_bytes_are_still_refused() {
+        assert!(decode(b"RIFFxxxxWAVEnope", "junk".into()).is_err());
     }
 
     #[test]

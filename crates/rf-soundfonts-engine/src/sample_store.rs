@@ -94,6 +94,7 @@ impl SampleStore {
         library_root: &Path,
         default_path: &str,
         relatives: &[String],
+        resident: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<StreamedSample>, SoundfontError> {
         fs::create_dir_all(&self.cache_root).map_err(|source| SoundfontError::Read {
             path: self.cache_root.display().to_string(),
@@ -107,7 +108,7 @@ impl SampleStore {
         if workers <= 1 {
             return relatives
                 .iter()
-                .map(|relative| self.load_one(library_root, default_path, relative))
+                .map(|relative| self.load_one(library_root, default_path, relative, resident.contains(relative)))
                 .collect();
         }
 
@@ -121,7 +122,12 @@ impl SampleStore {
                 scope.spawn(move || {
                     for index in (worker..relatives.len()).step_by(workers) {
                         let loaded =
-                            self.load_one(library_root, default_path, &relatives[index]);
+                            self.load_one(
+                            library_root,
+                            default_path,
+                            &relatives[index],
+                            resident.contains(&relatives[index]),
+                        );
                         // A closed receiver means another worker already
                         // failed and the load is being abandoned.
                         if sender.send((index, loaded)).is_err() {
@@ -152,11 +158,17 @@ impl SampleStore {
     }
 
     /// Loads one sample, transcoding it first if the cache is missing or stale.
+    ///
+    /// `force_resident` holds the whole sample in memory even when the file
+    /// declares no loop of its own. A Kontakt zone states its loop in the
+    /// instrument document rather than in the audio, so the file cannot be
+    /// asked whether playback will move backwards through it.
     pub fn load_one(
         &self,
         library_root: &Path,
         default_path: &str,
         relative: &str,
+        force_resident: bool,
     ) -> Result<StreamedSample, SoundfontError> {
         let source = sample::resolve(library_root, default_path, relative);
         let cache_path = pcm_cache::cache_path(&self.cache_root, relative);
@@ -184,7 +196,7 @@ impl SampleStore {
         // streaming window only moves forward. Holding the sample costs memory
         // that looped libraries do not have much of: they loop precisely
         // because they are built from short recordings.
-        let resident_whole = header.sample_loop.is_some()
+        let resident_whole = (force_resident || header.sample_loop.is_some())
             && header.frame_count * channels * size_of::<f32>() <= MAX_LOOPED_RESIDENT_BYTES;
         let preload_frames = if resident_whole {
             header.frame_count
@@ -274,7 +286,7 @@ mod tests {
         let root = temp_root();
         let name = write_source(&root, "short.wav", 128);
         let store = SampleStore::beside(&root);
-        let loaded = store.load_one(&root, "", &name).unwrap();
+        let loaded = store.load_one(&root, "", &name, false).unwrap();
         assert_eq!(loaded.frame_count, 128);
         assert!(loaded.is_fully_resident(), "a short sample needs no reader");
     }
@@ -285,7 +297,7 @@ mod tests {
         let frames = PRELOAD_FRAMES * 3;
         let name = write_source(&root, "long.wav", frames);
         let store = SampleStore::beside(&root);
-        let loaded = store.load_one(&root, "", &name).unwrap();
+        let loaded = store.load_one(&root, "", &name, false).unwrap();
         assert_eq!(loaded.frame_count, frames);
         assert_eq!(loaded.preload_frames, PRELOAD_FRAMES);
         assert!(!loaded.is_fully_resident());
@@ -298,7 +310,7 @@ mod tests {
         let root = temp_root();
         let name = write_source(&root, "head.wav", PRELOAD_FRAMES * 2);
         let store = SampleStore::beside(&root);
-        let loaded = store.load_one(&root, "", &name).unwrap();
+        let loaded = store.load_one(&root, "", &name, false).unwrap();
         // Source ramps from zero, so the first frame must be near silence and
         // a later one must not be.
         assert!(loaded.preload[0].abs() < 1e-3);
@@ -310,11 +322,11 @@ mod tests {
         let root = temp_root();
         let name = write_source(&root, "reuse.wav", 4_096);
         let store = SampleStore::beside(&root);
-        let first = store.load_one(&root, "", &name).unwrap();
+        let first = store.load_one(&root, "", &name, false).unwrap();
 
         // Removing the source proves the second load never touched it.
         fs::remove_file(root.join(&name)).unwrap();
-        let second = store.load_one(&root, "", &name).unwrap();
+        let second = store.load_one(&root, "", &name, false).unwrap();
         assert_eq!(first.frame_count, second.frame_count);
         assert_eq!(first.preload.len(), second.preload.len());
     }
@@ -324,14 +336,14 @@ mod tests {
         let root = temp_root();
         let name = write_source(&root, "stale.wav", 1_024);
         let store = SampleStore::beside(&root);
-        let first = store.load_one(&root, "", &name).unwrap();
+        let first = store.load_one(&root, "", &name, false).unwrap();
         assert_eq!(first.frame_count, 1_024);
 
         // Re-export the sample at a different length and touch it forward, as
         // a library update would.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         write_source(&root, "stale.wav", 2_048);
-        let second = store.load_one(&root, "", &name).unwrap();
+        let second = store.load_one(&root, "", &name, false).unwrap();
         assert_eq!(
             second.frame_count, 2_048,
             "a replaced library kept playing the old audio"
@@ -343,9 +355,9 @@ mod tests {
         let root = temp_root();
         let name = write_source(&root, "clear.wav", 1_024);
         let store = SampleStore::beside(&root);
-        store.load_one(&root, "", &name).unwrap();
+        store.load_one(&root, "", &name, false).unwrap();
         store.clear().unwrap();
-        assert!(store.load_one(&root, "", &name).is_ok());
+        assert!(store.load_one(&root, "", &name, false).is_ok());
     }
 
     #[test]
@@ -361,7 +373,7 @@ mod tests {
             .map(|index| write_source(&root, &format!("voice{index}.wav"), 256 + index * 8))
             .collect();
         let store = SampleStore::beside(&root);
-        let loaded = store.load_all(&root, "", &names).unwrap();
+        let loaded = store.load_all(&root, "", &names, &Default::default()).unwrap();
         assert_eq!(loaded.len(), names.len());
         for (index, sample) in loaded.iter().enumerate() {
             assert_eq!(sample.name, names[index], "results came back reordered");
@@ -375,14 +387,14 @@ mod tests {
         let mut names = vec![write_source(&root, "good.wav", 128)];
         names.push("missing.wav".to_string());
         let store = SampleStore::beside(&root);
-        assert!(store.load_all(&root, "", &names).is_err());
+        assert!(store.load_all(&root, "", &names, &Default::default()).is_err());
     }
 
     #[test]
     fn an_empty_request_is_not_an_error() {
         let root = temp_root();
         let store = SampleStore::beside(&root);
-        assert!(store.load_all(&root, "", &[]).unwrap().is_empty());
+        assert!(store.load_all(&root, "", &[], &Default::default()).unwrap().is_empty());
     }
 
     /// Checks every cached sample against the file it was made from.
@@ -428,7 +440,7 @@ mod tests {
                 relative,
             ))
             .unwrap();
-            let loaded = store.load_one(root, &default_path, relative).unwrap();
+            let loaded = store.load_one(root, &default_path, relative, false).unwrap();
 
             if loaded.frame_count != source.frame_count() {
                 suspects.push(format!(
@@ -520,7 +532,7 @@ mod tests {
 
         let store = SampleStore::beside(root);
         let started = Instant::now();
-        let samples = store.load_all(root, &default_path, &relatives).unwrap();
+        let samples = store.load_all(root, &default_path, &relatives, &Default::default()).unwrap();
         let elapsed = started.elapsed();
 
         let resident: usize = samples.iter().map(StreamedSample::resident_bytes).sum();
