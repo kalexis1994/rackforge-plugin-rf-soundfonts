@@ -22,7 +22,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::pcm_cache::{self, CacheHeader};
-use crate::{DlsError, sample};
+use crate::{SoundfontError, sample};
 
 /// Frames of every sample kept resident, following LinuxSampler's default.
 pub const PRELOAD_FRAMES: usize = 32_768;
@@ -80,7 +80,7 @@ impl SampleStore {
 
     /// Default cache location for a library.
     pub fn beside(library_root: &Path) -> Self {
-        Self::new(library_root.join(".rf-dls-cache"))
+        Self::new(library_root.join(".rf-soundfonts-cache"))
     }
 
     /// Loads every distinct sample, transcoding on all available cores.
@@ -94,8 +94,8 @@ impl SampleStore {
         library_root: &Path,
         default_path: &str,
         relatives: &[String],
-    ) -> Result<Vec<StreamedSample>, DlsError> {
-        fs::create_dir_all(&self.cache_root).map_err(|source| DlsError::Read {
+    ) -> Result<Vec<StreamedSample>, SoundfontError> {
+        fs::create_dir_all(&self.cache_root).map_err(|source| SoundfontError::Read {
             path: self.cache_root.display().to_string(),
             source,
         })?;
@@ -141,7 +141,7 @@ impl SampleStore {
                 .enumerate()
                 .map(|(index, slot)| {
                     slot.ok_or_else(|| {
-                        DlsError::Invalid(format!(
+                        SoundfontError::Invalid(format!(
                             "sample {:?} was never loaded",
                             relatives[index]
                         ))
@@ -157,7 +157,7 @@ impl SampleStore {
         library_root: &Path,
         default_path: &str,
         relative: &str,
-    ) -> Result<StreamedSample, DlsError> {
+    ) -> Result<StreamedSample, SoundfontError> {
         let source = sample::resolve(library_root, default_path, relative);
         let cache_path = pcm_cache::cache_path(&self.cache_root, relative);
 
@@ -172,7 +172,7 @@ impl SampleStore {
             }
         };
 
-        let mut file = File::open(&cache_path).map_err(|source| DlsError::Read {
+        let mut file = File::open(&cache_path).map_err(|source| SoundfontError::Read {
             path: cache_path.display().to_string(),
             source,
         })?;
@@ -224,11 +224,11 @@ impl SampleStore {
     }
 
     /// Removes the cache directory.
-    pub fn clear(&self) -> Result<(), DlsError> {
+    pub fn clear(&self) -> Result<(), SoundfontError> {
         match fs::remove_dir_all(&self.cache_root) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(DlsError::Read {
+            Err(source) => Err(SoundfontError::Read {
                 path: self.cache_root.display().to_string(),
                 source,
             }),
@@ -242,7 +242,7 @@ mod tests {
 
     fn temp_root() -> PathBuf {
         let base = std::env::temp_dir().join(format!(
-            "rf-dls-store-{}-{:?}",
+            "rf-soundfonts-store-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -393,12 +393,12 @@ mod tests {
     /// step inside the audio large enough to be heard as a click.
     ///
     /// ```text
-    /// RF_DLS_SFZ="/path/to/instrument.sfz" cargo test --release -- --ignored --nocapture
+    /// RF_SOUNDFONTS_SFZ="/path/to/instrument.sfz" cargo test --release -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn audits_every_cached_sample() {
-        let path = std::env::var("RF_DLS_SFZ").expect("set RF_DLS_SFZ to an .sfz file");
+        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let path = Path::new(&path);
         let root = path.parent().unwrap_or(Path::new("."));
         let expanded = crate::sfz::preprocess::expand(path).unwrap();
@@ -492,14 +492,14 @@ mod tests {
     /// which is the number that matters for start-up on stage.
     ///
     /// ```text
-    /// RF_DLS_SFZ="/path/to/instrument.sfz" cargo test --release -- --ignored --nocapture
+    /// RF_SOUNDFONTS_SFZ="/path/to/instrument.sfz" cargo test --release -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn measures_a_real_library() {
         use std::time::Instant;
 
-        let path = std::env::var("RF_DLS_SFZ").expect("set RF_DLS_SFZ to an .sfz file");
+        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let path = Path::new(&path);
         let root = path.parent().unwrap_or(Path::new("."));
 

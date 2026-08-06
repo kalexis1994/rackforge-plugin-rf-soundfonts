@@ -1,14 +1,14 @@
-# RF-DLS project status
+# RF-Soundfonts project status
 
 Snapshot date: 2026-08-02
 
 Plugin version: `0.1.0`
 
-Plugin ID: `org.rackforge.rf-dls`
+Plugin ID: `org.rackforge.rf-soundfonts`
 
 ## Current maturity
 
-RF-DLS is a functional RackForge instrument for user-supplied DLS Level 1/2
+RF-Soundfonts is a functional RackForge instrument for user-supplied DLS Level 1/2
 banks. The parser, sample renderer, custom-program model, RackForge integration,
 LITTLE surface, Web surfaces and native packaging path are implemented and
 covered by automated tests.
@@ -79,7 +79,7 @@ Not implemented:
 - Proprietary bank chunks may be ignored or rejected.
 - Per-layer pan and insertable per-layer FX are not implemented.
 - Adding or removing custom-program files currently requires restarting the
-  RF-DLS engine to rebuild its catalog.
+  RF-Soundfonts engine to rebuild its catalog.
 - Correct playback depends on the user supplying a compatible, legally usable
   DLS bank; the DLS standard does not guarantee General MIDI contents.
 

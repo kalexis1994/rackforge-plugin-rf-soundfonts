@@ -22,7 +22,7 @@ use std::path::Path;
 use crate::sfz::parse::{Curve, OpcodeMap, SfzDocument};
 use crate::sample_store::{SampleStore, StreamedSample};
 use crate::streamer::Streamer;
-use crate::{DlsError, EnvelopeSpec, SampleParams, Voice, VoiceConfig};
+use crate::{SoundfontError, EnvelopeSpec, SampleParams, Voice, VoiceConfig};
 
 /// Controller values, normalised to `0.0..=1.0`.
 ///
@@ -144,7 +144,7 @@ const MAX_NORMALISATION: f32 = 8.0;
 
 impl SfzInstrument {
     /// Reads and loads an instrument, decoding every sample it references.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, DlsError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, SoundfontError> {
         let path = path.as_ref();
         let expanded = super::preprocess::expand(path)?;
         let document = super::parse::parse(&expanded)?;
@@ -156,7 +156,7 @@ impl SfzInstrument {
         Self::build(&document, root, name)
     }
 
-    fn build(document: &SfzDocument, root: &Path, name: String) -> Result<Self, DlsError> {
+    fn build(document: &SfzDocument, root: &Path, name: String) -> Result<Self, SoundfontError> {
         let default_path = document
             .control
             .get("default_path")
@@ -179,7 +179,7 @@ impl SfzInstrument {
             }
         }
         if order.is_empty() {
-            return Err(DlsError::Invalid(format!(
+            return Err(SoundfontError::Invalid(format!(
                 "SFZ instrument {name:?} references no samples"
             )));
         }
@@ -271,7 +271,7 @@ impl SfzInstrument {
         cc: &CcState,
         output_rate: u32,
         streamer: &Streamer,
-    ) -> Result<Vec<Voice>, DlsError> {
+    ) -> Result<Vec<Voice>, SoundfontError> {
         let mut voices = Vec::new();
         for region in &self.regions {
             if !region.accepts(note, velocity, cc) {
@@ -854,12 +854,12 @@ mod tests {
     /// they can be compared against the moment the resident head runs out.
     ///
     /// ```text
-    /// RF_DLS_SFZ="..." RF_DLS_NOTE=72 cargo test --release -- --ignored --nocapture
+    /// RF_SOUNDFONTS_SFZ="..." RF_DLS_NOTE=72 cargo test --release -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn finds_discontinuities_in_a_held_note() {
-        let path = std::env::var("RF_DLS_SFZ").expect("set RF_DLS_SFZ to an .sfz file");
+        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let note: u8 = std::env::var("RF_DLS_NOTE")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -922,12 +922,12 @@ mod tests {
     /// Loads a library the user supplies locally and plays a note through it.
     ///
     /// ```text
-    /// RF_DLS_SFZ="/path/to/instrument.sfz" cargo test -- --ignored --nocapture
+    /// RF_SOUNDFONTS_SFZ="/path/to/instrument.sfz" cargo test -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn loads_and_plays_a_real_library() {
-        let path = std::env::var("RF_DLS_SFZ").expect("set RF_DLS_SFZ to an .sfz file");
+        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let started = std::time::Instant::now();
         let instrument = SfzInstrument::open(&path).unwrap();
         let load = started.elapsed();

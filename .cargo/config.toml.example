@@ -1,4 +1,4 @@
-# Copy this file to `.cargo/config.toml` when RackForge and RF-DLS are checked
+# Copy this file to `.cargo/config.toml` when RackForge and RF-Soundfonts are checked
 # out as adjacent directories. The generated local file is intentionally
 # ignored so release builds continue to use the pinned SDK revision.
 

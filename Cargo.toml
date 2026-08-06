@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/rf-dls-engine",
+    "crates/rf-soundfonts-engine",
     "plugin",
 ]
 
@@ -9,7 +9,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "GPL-2.0-or-later"
-repository = "https://github.com/kalexis1994/rackforge-plugin-rf-dls"
+repository = "https://github.com/kalexis1994/rackforge-plugin-rf-soundfonts"
 
 [workspace.dependencies]
 anyhow = "1.0"

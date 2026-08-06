@@ -1,12 +1,12 @@
-# RF-DLS
+# RF-Soundfonts
 
-RF-DLS es el plugin de instrumento DLS nativo de RackForge. El binario no
+RF-Soundfonts es el plugin de instrumento DLS nativo de RackForge. El binario no
 incluye sonidos: recibe un archivo DLS aportado por el usuario mediante el
 recurso obligatorio `dls-bank`.
 
 ## Contrato inicial
 
-- ID estable: `org.rackforge.rf-dls`
+- ID estable: `org.rackforge.rf-soundfonts`
 - Package requirement: RackForge Plugin API 1.5
 - Native entry point: ABI 1.3 (compatible with hosts implementing API 1.5)
 - Tipo: instrumento
@@ -39,9 +39,9 @@ crear voces.
 Ejemplo de prueba en ARM64:
 
 ```bash
-rackforge-core smoke plugins/rf-dls/package \
-  --library target/release/librackforge_rf_dls.so \
-  --resource dls-bank=/home/kalex/rackforge/data/plugins/rf-dls/banks/gm.dls \
+rackforge-core smoke plugins/rf-soundfonts/package \
+  --library target/release/librackforge_rf_soundfonts.so \
+  --resource dls-bank=/home/kalex/rackforge/data/plugins/rf-soundfonts/banks/gm.dls \
   --preset gm.piano-1 \
   --data-root /home/kalex/rackforge/data
 ```
@@ -50,7 +50,7 @@ El `.dls` no debe copiarse al repositorio ni al futuro paquete `.rfplugin`.
 
 ## PLAY dinámico
 
-Al crear la instancia, RF-DLS ordena los instrumentos por banco y programa,
+Al crear la instancia, RF-Soundfonts ordena los instrumentos por banco y programa,
 elimina duplicados y publica un catálogo mediante Host API 1.5. El catálogo
 declara explícitamente cuáles presets puede reabrir el editor. Los IDs tienen
 esta forma opaca:
@@ -68,11 +68,11 @@ estructura interna del plugin.
 
 Los instrumentos descubiertos dentro del DLS son inmutables. Un CUSTOM no
 reescribe el banco: guarda una referencia a `dls-bank` + banco + programa y
-únicamente sus overrides. RF-DLS busca documentos con sufijo
+únicamente sus overrides. RF-Soundfonts busca documentos con sufijo
 `.rackforge-program.json` en:
 
 ```text
-data/plugins/org.rackforge.rf-dls/custom/
+data/plugins/org.rackforge.rf-soundfonts/custom/
 ```
 
 El payload v6 admite una capa `A` obligatoria y una capa `B` opcional. `A`
@@ -121,10 +121,10 @@ rackforge-core program-save /home/kalex/rackforge/data \
 ```
 
 El ID de catálogo resultante es `custom.user.warm-piano`. Cambiar o agregar
-archivos requiere reiniciar el motor RF-DLS para reconstruir el catálogo.
+archivos requiere reiniciar el motor RF-Soundfonts para reconstruir el catálogo.
 
 Durante una edición, Core entrega al plugin el documento completo mediante la
-extensión de programas. RF-DLS preescucha ese borrador de forma transitoria:
+extensión de programas. RF-Soundfonts preescucha ese borrador de forma transitoria:
 las dos capas, sus overrides y los FX compartidos ya se oyen antes de
 guardar, pero el catálogo y los archivos sólo cambian después de confirmar
 `SAVE`.

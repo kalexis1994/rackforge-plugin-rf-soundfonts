@@ -4,11 +4,11 @@
 //! single library may mix formats after conversion. Dispatching on the
 //! extension keeps that detail out of the instrument builder.
 
-use crate::{DlsError, Wave, flac, wav};
+use crate::{SoundfontError, Wave, flac, wav};
 use std::path::Path;
 
 /// Decodes a sample file, choosing a decoder by extension.
-pub fn load(path: impl AsRef<Path>) -> Result<Wave, DlsError> {
+pub fn load(path: impl AsRef<Path>) -> Result<Wave, SoundfontError> {
     let path = path.as_ref();
     let extension = path
         .extension()
@@ -17,7 +17,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Wave, DlsError> {
     match extension.as_str() {
         "wav" | "wave" => wav::load_wave(path),
         "flac" => flac::load_wave(path),
-        other => Err(DlsError::Unsupported(format!(
+        other => Err(SoundfontError::Unsupported(format!(
             "sample {} is a {other:?} file",
             path.display()
         ))),

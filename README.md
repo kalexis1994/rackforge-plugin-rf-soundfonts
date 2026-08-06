@@ -1,6 +1,6 @@
-# RackForge RF-DLS
+# RackForge RF-Soundfonts
 
-RF-DLS is an independently versioned RackForge instrument plugin that reads
+RF-Soundfonts is an independently versioned RackForge instrument plugin that reads
 user-provided DLS Level 1/2 banks. This repository owns the DLS parser and
 synthesizer, the native RackForge plugin adapter, its declarative program
 editor, and its static Web surfaces.
@@ -11,20 +11,20 @@ bank. Users install their own `.dls` resource through RackForge.
 ## Layout
 
 ```text
-crates/rf-dls-engine/  DLS parser and sample engine
+crates/rf-soundfonts-engine/  DLS parser and sample engine
 plugin/                RackForge ABI adapter and plugin-owned surfaces
 ```
 
 ## Local development
 
-For adjacent checkouts named `rackforge` and `rackforge-plugin-rf-dls`, copy
+For adjacent checkouts named `rackforge` and `rackforge-plugin-rf-soundfonts`, copy
 `.cargo/config.toml.example` to `.cargo/config.toml`. This replaces the pinned
 Git SDK source with the local RackForge API crates without changing release
 metadata.
 
 ```bash
 cargo test --workspace
-cargo build --release -p rackforge-rf-dls
+cargo build --release -p rackforge-rf-soundfonts
 ```
 
 Package the current platform build on Linux with:

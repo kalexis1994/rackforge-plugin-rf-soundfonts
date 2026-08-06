@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::DlsError;
+use crate::SoundfontError;
 
 /// Opcodes gathered for one scope, in name order.
 pub type OpcodeMap = BTreeMap<String, String>;
@@ -94,7 +94,7 @@ fn scope_of(header: &str) -> Scope {
 }
 
 /// Parses an already-expanded document.
-pub fn parse(source: &str) -> Result<SfzDocument, DlsError> {
+pub fn parse(source: &str) -> Result<SfzDocument, SoundfontError> {
     let mut document = SfzDocument::default();
     let mut global = OpcodeMap::new();
     let mut master = OpcodeMap::new();
@@ -183,7 +183,7 @@ pub fn parse(source: &str) -> Result<SfzDocument, DlsError> {
     flush!(scope);
 
     if document.regions.is_empty() {
-        return Err(DlsError::Invalid(
+        return Err(SoundfontError::Invalid(
             "SFZ document declares no regions".into(),
         ));
     }
@@ -425,12 +425,12 @@ mod tests {
     /// third-party instrument is committed here.
     ///
     /// ```text
-    /// RF_DLS_SFZ="/path/to/instrument.sfz" cargo test -- --ignored --nocapture
+    /// RF_SOUNDFONTS_SFZ="/path/to/instrument.sfz" cargo test -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn parses_a_real_library() {
-        let path = std::env::var("RF_DLS_SFZ").expect("set RF_DLS_SFZ to an .sfz file");
+        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let expanded = super::super::preprocess::expand(std::path::Path::new(&path)).unwrap();
         let document = parse(&expanded).unwrap();
 

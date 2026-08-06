@@ -1,5 +1,5 @@
 [package]
-name = "rackforge-rf-dls"
+name = "rackforge-rf-soundfonts"
 description = "RackForge instrument plugin for user-provided DLS sound banks"
 version.workspace = true
 edition.workspace = true
@@ -13,6 +13,6 @@ crate-type = ["cdylib", "rlib"]
 hound.workspace = true
 rackforge-dsp.workspace = true
 rackforge-plugin-api.workspace = true
-rf-dls = { path = "../crates/rf-dls-engine" }
+rf-soundfonts = { path = "../crates/rf-soundfonts-engine" }
 serde.workspace = true
 serde_json.workspace = true

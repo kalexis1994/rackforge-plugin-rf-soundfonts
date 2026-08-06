@@ -318,7 +318,7 @@ pub fn view(program: &CustomProgram) -> ProgramEditorView {
     });
     ProgramEditorView {
         schema_version: PROGRAM_EDITOR_SCHEMA_VERSION,
-        title: "RF-DLS".into(),
+        title: "RF-Soundfonts".into(),
         pages,
     }
 }
@@ -719,7 +719,7 @@ pub fn apply(
             "feedback" => chorus.feedback = required_number(value, field_id)? as f32 / 100.0,
             "width" => chorus.width = required_number(value, field_id)? as f32 / 100.0,
             "mix" => chorus.mix = required_number(value, field_id)? as f32 / 100.0,
-            _ => return Err(format!("unknown RF-DLS chorus field {field_id:?}")),
+            _ => return Err(format!("unknown RF-Soundfonts chorus field {field_id:?}")),
         }
         return Ok(());
     }
@@ -732,7 +732,7 @@ pub fn apply(
             "eq-low" => exciter.eq_low_db = required_number(value, field_id)? as f32,
             "eq-high" => exciter.eq_high_db = required_number(value, field_id)? as f32,
             "mix" => exciter.mix = required_number(value, field_id)? as f32 / 100.0,
-            _ => return Err(format!("unknown RF-DLS exciter field {field_id:?}")),
+            _ => return Err(format!("unknown RF-Soundfonts exciter field {field_id:?}")),
         }
         return Ok(());
     }
@@ -746,20 +746,20 @@ pub fn apply(
             "damping" => reverb.damping = required_number(value, field_id)? as f32 / 100.0,
             "width" => reverb.width = required_number(value, field_id)? as f32 / 100.0,
             "mix" => reverb.mix = required_number(value, field_id)? as f32 / 100.0,
-            _ => return Err(format!("unknown RF-DLS reverb field {field_id:?}")),
+            _ => return Err(format!("unknown RF-Soundfonts reverb field {field_id:?}")),
         }
         return Ok(());
     }
     let rest = field_id
         .strip_prefix("layer.")
-        .ok_or_else(|| format!("unknown RF-DLS editor field {field_id:?}"))?;
+        .ok_or_else(|| format!("unknown RF-Soundfonts editor field {field_id:?}"))?;
     let (layer_id, parameter) = rest
         .split_once('.')
-        .ok_or_else(|| format!("invalid RF-DLS editor field {field_id:?}"))?;
+        .ok_or_else(|| format!("invalid RF-Soundfonts editor field {field_id:?}"))?;
     let index = match layer_id {
         "a" => 0,
         "b" => 1,
-        _ => return Err(format!("unknown RF-DLS layer {layer_id:?}")),
+        _ => return Err(format!("unknown RF-Soundfonts layer {layer_id:?}")),
     };
     if index == 1 && program.layers.len() == 1 {
         if parameter != "enabled" {
@@ -777,7 +777,7 @@ pub fn apply(
     let layer = program
         .layers
         .get_mut(index)
-        .ok_or_else(|| format!("RF-DLS layer {layer_id:?} is unavailable"))?;
+        .ok_or_else(|| format!("RF-Soundfonts layer {layer_id:?} is unavailable"))?;
     match parameter {
         "enabled" if index == 1 => layer.enabled = required_boolean(value, field_id)?,
         "sound" => {
@@ -785,7 +785,7 @@ pub fn apply(
                 return Err(format!("{field_id:?} requires a sound id"));
             };
             let (bank, preset) = crate::parse_dynamic_preset_id(&id)
-                .ok_or_else(|| format!("invalid RF-DLS sound id {id:?}"))?;
+                .ok_or_else(|| format!("invalid RF-Soundfonts sound id {id:?}"))?;
             layer.source.bank = bank;
             layer.source.program = preset;
         }
@@ -868,7 +868,7 @@ pub fn apply(
             layer.parameters.lfo.mod_wheel_attenuation_depth_centibels =
                 optional_scaled(value, 1.0, field_id)?
         }
-        _ => return Err(format!("unknown RF-DLS editor field {field_id:?}")),
+        _ => return Err(format!("unknown RF-Soundfonts editor field {field_id:?}")),
     }
     Ok(())
 }

@@ -20,7 +20,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::{DlsError, Wave};
+use crate::{SoundfontError, Wave};
 
 /// Identifies the file and guards against reading a cache from a future build.
 const MAGIC: &[u8; 8] = b"RFDLSPCM";
@@ -93,7 +93,7 @@ impl CacheHeader {
 ///
 /// Written to a temporary name and renamed, so an interrupted transcode leaves
 /// no half-written cache that a later run would trust.
-pub fn write(path: &Path, wave: &Wave, format: CacheFormat) -> Result<CacheHeader, DlsError> {
+pub fn write(path: &Path, wave: &Wave, format: CacheFormat) -> Result<CacheHeader, SoundfontError> {
     let header = CacheHeader {
         sample_rate: wave.sample_rate,
         channels: wave.channels,
@@ -102,13 +102,13 @@ pub fn write(path: &Path, wave: &Wave, format: CacheFormat) -> Result<CacheHeade
         sample_loop: wave.sample_params.and_then(|params| params.sample_loop),
     };
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| DlsError::Read {
+        fs::create_dir_all(parent).map_err(|source| SoundfontError::Read {
             path: parent.display().to_string(),
             source,
         })?;
     }
     let temporary = path.with_extension("pcm-partial");
-    let read_error = |source| DlsError::Read {
+    let read_error = |source| SoundfontError::Read {
         path: temporary.display().to_string(),
         source,
     };
@@ -152,7 +152,7 @@ pub fn write(path: &Path, wave: &Wave, format: CacheFormat) -> Result<CacheHeade
         }
         file.sync_all().map_err(read_error)?;
     }
-    fs::rename(&temporary, path).map_err(|source| DlsError::Read {
+    fs::rename(&temporary, path).map_err(|source| SoundfontError::Read {
         path: path.display().to_string(),
         source,
     })?;
@@ -160,32 +160,32 @@ pub fn write(path: &Path, wave: &Wave, format: CacheFormat) -> Result<CacheHeade
 }
 
 /// Reads a cache header, rejecting anything this build cannot interpret.
-pub fn read_header(file: &mut File) -> Result<CacheHeader, DlsError> {
+pub fn read_header(file: &mut File) -> Result<CacheHeader, SoundfontError> {
     let mut bytes = [0_u8; HEADER_BYTES as usize];
     file.seek(SeekFrom::Start(0))
         .and_then(|_| file.read_exact(&mut bytes))
-        .map_err(|source| DlsError::Read {
+        .map_err(|source| SoundfontError::Read {
             path: "PCM cache".into(),
             source,
         })?;
     if &bytes[0..8] != MAGIC {
-        return Err(DlsError::Invalid("PCM cache has the wrong magic".into()));
+        return Err(SoundfontError::Invalid("PCM cache has the wrong magic".into()));
     }
     let word = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
     if word(8) != VERSION {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "PCM cache is version {} and this build writes {VERSION}",
             word(8)
         )));
     }
     let channels = word(16);
     if !(1..=2).contains(&channels) {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "PCM cache declares {channels} channels"
         )));
     }
     let format = CacheFormat::from_tag(word(20))
-        .ok_or_else(|| DlsError::Invalid("PCM cache has an unknown sample format".into()))?;
+        .ok_or_else(|| SoundfontError::Invalid("PCM cache has an unknown sample format".into()))?;
     let frame_count = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
     let loop_start = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
     let loop_end = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
@@ -213,7 +213,7 @@ pub fn read_frames(
     first_frame: usize,
     out: &mut [f32],
     scratch: &mut Vec<u8>,
-) -> Result<usize, DlsError> {
+) -> Result<usize, SoundfontError> {
     let channels = usize::from(header.channels).max(1);
     let wanted = (out.len() / channels).min(header.frame_count.saturating_sub(first_frame));
     if wanted == 0 {
@@ -244,28 +244,28 @@ pub fn read_frames(
 /// Streams for different voices share one open file, so a read that moved a
 /// shared cursor would hand the wrong audio to whichever voice read next.
 #[cfg(unix)]
-fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> Result<(), DlsError> {
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> Result<(), SoundfontError> {
     use std::os::unix::fs::FileExt;
     file.read_exact_at(buffer, offset)
-        .map_err(|source| DlsError::Read {
+        .map_err(|source| SoundfontError::Read {
             path: "PCM cache".into(),
             source,
         })
 }
 
 #[cfg(windows)]
-fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> Result<(), DlsError> {
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> Result<(), SoundfontError> {
     use std::os::windows::fs::FileExt;
     let mut read = 0;
     while read < buffer.len() {
         let count = file
             .seek_read(&mut buffer[read..], offset + read as u64)
-            .map_err(|source| DlsError::Read {
+            .map_err(|source| SoundfontError::Read {
                 path: "PCM cache".into(),
                 source,
             })?;
         if count == 0 {
-            return Err(DlsError::Invalid("PCM cache ended early".into()));
+            return Err(SoundfontError::Invalid("PCM cache ended early".into()));
         }
         read += count;
     }
@@ -305,7 +305,7 @@ mod tests {
 
     fn temp_root() -> PathBuf {
         let base = std::env::temp_dir().join(format!(
-            "rf-dls-pcm-{}-{:?}",
+            "rf-soundfonts-pcm-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

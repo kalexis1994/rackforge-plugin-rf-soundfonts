@@ -1,13 +1,13 @@
 use rackforge_plugin_api::{
     PROGRAM_EDIT_SCHEMA_VERSION, PROGRAM_SCHEMA_VERSION, PreparedProgram, ProgramDocument,
 };
-use rf_dls::{EnvelopeSpec, Instrument, LfoSpec, PitchEnvelopeSpec, VoiceConfig};
+use rf_soundfonts::{EnvelopeSpec, Instrument, LfoSpec, PitchEnvelopeSpec, VoiceConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const PLUGIN_ID: &str = "org.rackforge.rf-dls";
+pub const PLUGIN_ID: &str = "org.rackforge.rf-soundfonts";
 pub const PAYLOAD_VERSION: u32 = 6;
 pub const EXCITER_PAYLOAD_VERSION: u32 = 5;
 pub const REVERB_PAYLOAD_VERSION: u32 = 4;
@@ -42,14 +42,14 @@ impl CustomProgram {
         }
         if !matches!(document.plugin_state_version, 1 | 2) {
             return Err(format!(
-                "unsupported RF-DLS state compatibility {}",
+                "unsupported RF-Soundfonts state compatibility {}",
                 document.plugin_state_version
             ));
         }
         let (slot, gain, layers, effects) = match document.payload_version {
             LEGACY_PAYLOAD_VERSION => {
                 let payload: LegacyCustomProgramPayload = serde_json::from_value(document.payload)
-                    .map_err(|error| format!("parsing RF-DLS v1 payload: {error}"))?;
+                    .map_err(|error| format!("parsing RF-Soundfonts v1 payload: {error}"))?;
                 payload.validate()?;
                 (
                     payload.slot,
@@ -63,7 +63,7 @@ impl CustomProgram {
             }
             EXCITER_PAYLOAD_VERSION => {
                 let payload: V5CustomProgramPayload = serde_json::from_value(document.payload)
-                    .map_err(|error| format!("parsing RF-DLS v5 payload: {error}"))?;
+                    .map_err(|error| format!("parsing RF-Soundfonts v5 payload: {error}"))?;
                 let payload = payload.migrate()?;
                 (payload.slot, payload.gain, payload.layers, payload.effects)
             }
@@ -74,14 +74,14 @@ impl CustomProgram {
                 let payload: CustomProgramPayload = serde_json::from_value(document.payload)
                     .map_err(|error| {
                         format!(
-                            "parsing RF-DLS v{} payload: {error}",
+                            "parsing RF-Soundfonts v{} payload: {error}",
                             document.payload_version
                         )
                     })?;
                 payload.validate()?;
                 (payload.slot, payload.gain, payload.layers, payload.effects)
             }
-            version => return Err(format!("unsupported RF-DLS payload version {version}")),
+            version => return Err(format!("unsupported RF-Soundfonts payload version {version}")),
         };
         let program = Self {
             id: document.id,
@@ -113,7 +113,7 @@ impl CustomProgram {
                 layers: self.layers.clone(),
                 effects: self.effects,
             })
-            .map_err(|error| format!("serializing RF-DLS payload: {error}"))?,
+            .map_err(|error| format!("serializing RF-Soundfonts payload: {error}"))?,
         })
     }
 
@@ -499,7 +499,7 @@ impl ProgramLayer {
 
     fn validate(&self) -> Result<(), String> {
         if !matches!(self.id.as_str(), "a" | "b") {
-            return Err("RF-DLS layer id must be \"a\" or \"b\"".into());
+            return Err("RF-Soundfonts layer id must be \"a\" or \"b\"".into());
         }
         self.source.validate()?;
         self.key_range.validate("key", &self.id)?;
@@ -853,7 +853,7 @@ pub fn load_programs(
     let metadata = fs::symlink_metadata(&directory)
         .map_err(|error| format!("inspecting {}: {error}", directory.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err("RF-DLS custom storage must be a real directory".into());
+        return Err("RF-Soundfonts custom storage must be a real directory".into());
     }
     let canonical_root = fs::canonicalize(&directory)
         .map_err(|error| format!("resolving {}: {error}", directory.display()))?;
@@ -870,7 +870,7 @@ pub fn load_programs(
     paths.sort();
     if paths.len() > MAX_PROGRAMS {
         return Err(format!(
-            "RF-DLS custom storage contains more than {MAX_PROGRAMS} programs"
+            "RF-Soundfonts custom storage contains more than {MAX_PROGRAMS} programs"
         ));
     }
 

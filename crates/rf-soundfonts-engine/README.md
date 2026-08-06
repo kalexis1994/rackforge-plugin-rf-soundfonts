@@ -1,4 +1,4 @@
-# RF-DLS engine (prueba)
+# RF-Soundfonts engine (prueba)
 
 Motor para el subconjunto inicial de Downloadable Sounds Level 1/2 que necesita
 RackForge. DLS estandariza el contenedor y el comportamiento del sintetizador,
@@ -24,12 +24,12 @@ La primera etapa soporta:
 Todavía no se interpretan todos los destinos de articulación de DLS-2, filtros,
 matrices de modulación, formatos de onda distintos de PCM16 mono ni chunks
 propietarios. Un banco que use esas capacidades puede ser DLS válido y aun así
-quedar fuera de la compatibilidad actual de RF-DLS.
+quedar fuera de la compatibilidad actual de RF-Soundfonts.
 
 ```text
 cargo run --release -- inspect /ruta/banco.dls
 cargo run --release -- render /ruta/banco.dls 0 0 60 piano-c4.wav
-rf-dls-live --bank 0 --program 0 /ruta/banco.dls
+rf-soundfonts-live --bank 0 --program 0 /ruta/banco.dls
 ```
 
 Los bancos son recursos aportados por el usuario y deben contar con una

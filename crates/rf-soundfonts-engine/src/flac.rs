@@ -11,7 +11,7 @@
 //! `loop_start` and `loop_end` in the SFZ itself; sustained-to-silence
 //! material such as piano never needed them.
 
-use crate::{DlsError, Wave};
+use crate::{SoundfontError, Wave};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -20,9 +20,9 @@ use std::sync::Arc;
 const MAX_CHANNELS: u32 = 2;
 
 /// Decodes a FLAC file into the engine's shared [`Wave`] representation.
-pub fn load_wave(path: impl AsRef<Path>) -> Result<Wave, DlsError> {
+pub fn load_wave(path: impl AsRef<Path>) -> Result<Wave, SoundfontError> {
     let path = path.as_ref();
-    let bytes = fs::read(path).map_err(|source| DlsError::Read {
+    let bytes = fs::read(path).map_err(|source| SoundfontError::Read {
         path: path.display().to_string(),
         source,
     })?;
@@ -34,21 +34,21 @@ pub fn load_wave(path: impl AsRef<Path>) -> Result<Wave, DlsError> {
 }
 
 /// Decodes FLAC bytes already held in memory.
-pub fn decode(bytes: &[u8], name: String) -> Result<Wave, DlsError> {
+pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
     let mut reader = claxon::FlacReader::new(std::io::Cursor::new(bytes))
-        .map_err(|error| DlsError::Invalid(format!("cannot read FLAC {name:?}: {error}")))?;
+        .map_err(|error| SoundfontError::Invalid(format!("cannot read FLAC {name:?}: {error}")))?;
     let info = reader.streaminfo();
     if info.channels == 0 || info.channels > MAX_CHANNELS {
-        return Err(DlsError::Unsupported(format!(
+        return Err(SoundfontError::Unsupported(format!(
             "FLAC {name:?} has {} channels; only mono and stereo are supported",
             info.channels
         )));
     }
     if info.sample_rate == 0 {
-        return Err(DlsError::Invalid(format!("FLAC {name:?} has no sample rate")));
+        return Err(SoundfontError::Invalid(format!("FLAC {name:?} has no sample rate")));
     }
     if !(1..=32).contains(&info.bits_per_sample) {
-        return Err(DlsError::Unsupported(format!(
+        return Err(SoundfontError::Unsupported(format!(
             "FLAC {name:?} is {}-bit",
             info.bits_per_sample
         )));
@@ -63,15 +63,15 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, DlsError> {
     );
     for sample in reader.samples() {
         let value =
-            sample.map_err(|error| DlsError::Invalid(format!("FLAC {name:?}: {error}")))?;
+            sample.map_err(|error| SoundfontError::Invalid(format!("FLAC {name:?}: {error}")))?;
         samples.push(value as f32 * scale);
     }
 
     if samples.is_empty() {
-        return Err(DlsError::Invalid(format!("FLAC {name:?} contains no audio")));
+        return Err(SoundfontError::Invalid(format!("FLAC {name:?} contains no audio")));
     }
     if samples.len() % info.channels as usize != 0 {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "FLAC {name:?} ends on a partial frame"
         )));
     }
@@ -149,12 +149,12 @@ mod tests {
     /// library on disk.
     ///
     /// ```text
-    /// RF_DLS_FLAC=/path/to/sample.flac cargo test -- --ignored --nocapture
+    /// RF_SOUNDFONTS_FLAC=/path/to/sample.flac cargo test -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "requires a locally supplied FLAC sample"]
     fn decodes_a_real_sample() {
-        let path = std::env::var("RF_DLS_FLAC").expect("set RF_DLS_FLAC to a .flac file");
+        let path = std::env::var("RF_SOUNDFONTS_FLAC").expect("set RF_SOUNDFONTS_FLAC to a .flac file");
         let wave = load_wave(&path).unwrap();
         eprintln!(
             "{}: {} Hz, {} channels, {} frames",

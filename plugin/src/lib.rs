@@ -16,7 +16,7 @@ use rackforge_plugin_api::{
     ProgramEditRequest, ProgramEditorView, ProgramFieldEditRequest, SurfaceActivationRequest,
     SurfaceActivationResponse,
 };
-use rf_dls::{DlsBank, Voice};
+use rf_soundfonts::{DlsBank, Voice};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::c_void;
@@ -39,7 +39,7 @@ const LEGACY_STATE_SIZE: usize = 16;
 
 const RUNTIME_DESCRIPTOR: &[u8] = br#"{
   "schema_version": 1,
-  "id": "org.rackforge.rf-dls",
+  "id": "org.rackforge.rf-soundfonts",
   "version": "0.1.0",
   "state_version": 3
 }"#;
@@ -47,7 +47,7 @@ const RUNTIME_DESCRIPTOR: &[u8] = br#"{
 const PARAMETER_SCHEMA: &[u8] = br#"{
   "schema_version": 1,
   "pages": [
-    { "id": "sound", "name": "Sound", "order": 0, "header": "RF-DLS" }
+    { "id": "sound", "name": "Sound", "order": 0, "header": "RF-Soundfonts" }
   ],
   "parameters": [
     {
@@ -282,12 +282,12 @@ impl RfDls {
         if canonical.storage_path != prepared.storage_path
             || canonical.preview_sound_id != prepared.preview_sound_id
         {
-            return Err("prepared RF-DLS preview metadata is not canonical".into());
+            return Err("prepared RF-Soundfonts preview metadata is not canonical".into());
         }
         let program = CustomProgram::from_document(canonical.document)?;
         let preset_id = format!("preview.{}", program.id);
         if !self.activate_custom_program(program, &preset_id, false) {
-            return Err("RF-DLS could not activate the prepared preview".into());
+            return Err("RF-Soundfonts could not activate the prepared preview".into());
         }
         Ok(())
     }
@@ -373,7 +373,7 @@ impl RfDls {
                     .iter()
                     .all(|program| program.slot != *slot)
             })
-            .ok_or_else(|| "RF-DLS has no free CUSTOM slots".to_owned())?;
+            .ok_or_else(|| "RF-Soundfonts has no free CUSTOM slots".to_owned())?;
         let source = self
             .bank
             .instruments
@@ -448,7 +448,7 @@ impl RfDls {
         if canonical.storage_path != prepared.storage_path
             || canonical.preview_sound_id != prepared.preview_sound_id
         {
-            return Err("prepared RF-DLS program metadata is not canonical".into());
+            return Err("prepared RF-Soundfonts program metadata is not canonical".into());
         }
         let program = CustomProgram::from_document(canonical.document)?;
         if let Some(current) = self
@@ -1051,7 +1051,7 @@ unsafe extern "C" fn create(host: *const HostApiV1) -> *mut c_void {
                 host,
                 LOG_LEVEL_INFO,
                 &format!(
-                    "RF-DLS bank loaded with {} CUSTOM programs",
+                    "RF-Soundfonts bank loaded with {} CUSTOM programs",
                     custom_programs.len()
                 ),
             );
@@ -1226,7 +1226,7 @@ fn state_bytes(plugin: &RfDls) -> Vec<u8> {
             effects: plugin.active_effects,
         },
     };
-    let payload = serde_json::to_vec(&snapshot).expect("validated RF-DLS state serializes");
+    let payload = serde_json::to_vec(&snapshot).expect("validated RF-Soundfonts state serializes");
     let mut state = Vec::with_capacity(4 + payload.len());
     state.extend_from_slice(b"RFD3");
     state.extend_from_slice(&payload);
@@ -1683,7 +1683,7 @@ pub extern "C" fn rackforge_surface_extension_entry_v1() -> *const SurfaceExtens
 mod tests {
     use super::*;
     use rackforge_plugin_api::{ParameterSchema, PresetCatalog, RuntimeDescriptor, SurfaceMode};
-    use rf_dls::{
+    use rf_soundfonts::{
         EnvelopeSpec, Instrument, LfoSpec, PitchEnvelopeSpec, Region, SampleLoop, SampleParams,
         Wave,
     };
@@ -1774,7 +1774,7 @@ mod tests {
     #[test]
     fn exports_valid_metadata() {
         let descriptor: RuntimeDescriptor = serde_json::from_slice(RUNTIME_DESCRIPTOR).unwrap();
-        assert_eq!(descriptor.id, "org.rackforge.rf-dls");
+        assert_eq!(descriptor.id, "org.rackforge.rf-soundfonts");
         let parameters: ParameterSchema = serde_json::from_slice(PARAMETER_SCHEMA).unwrap();
         assert_eq!(parameters.validate(), Ok(()));
         let presets: PresetCatalog = serde_json::from_slice(PRESET_CATALOG).unwrap();
@@ -1858,7 +1858,7 @@ mod tests {
     }
 
     #[test]
-    fn declarative_editor_owns_rf_dls_payload_mutations() {
+    fn declarative_editor_owns_program_payload_mutations() {
         let plugin = synthetic_plugin();
         let created = plugin
             .begin_program_edit(&ProgramEditRequest::new(None))
@@ -1867,7 +1867,7 @@ mod tests {
             .program_editor_view(created.document.clone())
             .unwrap();
         assert_eq!(view.validate(), Ok(()));
-        assert_eq!(view.title, "RF-DLS");
+        assert_eq!(view.title, "RF-Soundfonts");
         assert_eq!(
             view.pages
                 .iter()

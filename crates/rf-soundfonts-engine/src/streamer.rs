@@ -36,7 +36,7 @@ use std::time::Duration;
 use crate::pcm_cache::{self, CacheHeader};
 use crate::sample_store::StreamedSample;
 use crate::spsc::SpscRing;
-use crate::DlsError;
+use crate::SoundfontError;
 
 /// Frames each stream buffers ahead. About 0.74 s at 44.1 kHz.
 pub const STREAM_RING_FRAMES: usize = 32_768;
@@ -191,7 +191,7 @@ impl Streamer {
         });
         let worker = Arc::clone(&shared);
         let thread = thread::Builder::new()
-            .name("rf-dls-streamer".into())
+            .name("rf-soundfonts-streamer".into())
             .spawn(move || {
                 elevate_priority();
                 run(worker)
@@ -528,7 +528,7 @@ impl StreamWindow {
 }
 
 /// Reads a stream to its end, for tests and offline rendering.
-pub fn drain(reader: &StreamReader, out: &mut Vec<f32>, limit: usize) -> Result<(), DlsError> {
+pub fn drain(reader: &StreamReader, out: &mut Vec<f32>, limit: usize) -> Result<(), SoundfontError> {
     let mut block = [0.0_f32; 1024];
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while out.len() < limit {
@@ -538,7 +538,7 @@ pub fn drain(reader: &StreamReader, out: &mut Vec<f32>, limit: usize) -> Result<
                 return Ok(());
             }
             if std::time::Instant::now() > deadline {
-                return Err(DlsError::Invalid("stream stalled".into()));
+                return Err(SoundfontError::Invalid("stream stalled".into()));
             }
             thread::sleep(Duration::from_millis(1));
             continue;
@@ -558,7 +558,7 @@ mod tests {
 
     fn temp_root() -> PathBuf {
         let base = std::env::temp_dir().join(format!(
-            "rf-dls-streamer-{}-{:?}",
+            "rf-soundfonts-streamer-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

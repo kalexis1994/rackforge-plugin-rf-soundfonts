@@ -3,8 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 platform="${RACKFORGE_PLATFORM:-linux-aarch64}"
-output="${1:-$repo_root/rf-dls-0.1.0.rfplugin}"
-binary="$repo_root/target/release/librackforge_rf_dls.so"
+output="${1:-$repo_root/rf-soundfonts-0.1.0.rfplugin}"
+binary="$repo_root/target/release/librackforge_rf_soundfonts.so"
 
 case "$platform" in
   linux-aarch64|linux-x86_64) ;;
@@ -20,12 +20,12 @@ if [[ -e "$output" ]]; then
 fi
 
 cd "$repo_root"
-cargo build --release -p rackforge-rf-dls
+cargo build --release -p rackforge-rf-soundfonts
 test -f "$binary"
 install -d "$output/lib" "$output/web"
 install -m 0644 plugin/package/rackforge-plugin.toml "$output/rackforge-plugin.toml"
 cp -a plugin/package/web/. "$output/web/"
-install -m 0755 "$binary" "$output/lib/librackforge_rf_dls.so"
+install -m 0755 "$binary" "$output/lib/librackforge_rf_soundfonts.so"
 
 printf 'RFPLUGIN_BUILT path=%s platform=%s sha256=%s\n' \
-  "$output" "$platform" "$(sha256sum "$output/lib/librackforge_rf_dls.so" | awk '{print $1}')"
+  "$output" "$platform" "$(sha256sum "$output/lib/librackforge_rf_soundfonts.so" | awk '{print $1}')"

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "user.warm-piano",
   "name": "Warm Piano",
-  "plugin_id": "org.rackforge.rf-dls",
+  "plugin_id": "org.rackforge.rf-soundfonts",
   "plugin_version": "0.1.0",
   "plugin_state_version": 2,
   "payload_version": 1,

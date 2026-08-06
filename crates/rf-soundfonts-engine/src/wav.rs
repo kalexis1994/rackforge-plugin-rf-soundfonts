@@ -13,7 +13,7 @@
 //! loader that ignored `smpl` would play those sustained instruments as
 //! one-shots that stop mid-note.
 
-use crate::{DlsError, SampleLoop, Wave};
+use crate::{SoundfontError, SampleLoop, Wave};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -26,9 +26,9 @@ const MAX_CHANNELS: u16 = 2;
 /// The returned wave is interleaved and normalised to `-1.0..=1.0`. Loop
 /// points found in `smpl` are reported in frames, matching the rest of the
 /// engine.
-pub fn load_wave(path: impl AsRef<Path>) -> Result<Wave, DlsError> {
+pub fn load_wave(path: impl AsRef<Path>) -> Result<Wave, SoundfontError> {
     let path = path.as_ref();
-    let bytes = fs::read(path).map_err(|source| DlsError::Read {
+    let bytes = fs::read(path).map_err(|source| SoundfontError::Read {
         path: path.display().to_string(),
         source,
     })?;
@@ -40,26 +40,26 @@ pub fn load_wave(path: impl AsRef<Path>) -> Result<Wave, DlsError> {
 }
 
 /// Decodes WAV bytes already held in memory.
-pub fn decode(bytes: &[u8], name: String) -> Result<Wave, DlsError> {
+pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
     let reader = hound::WavReader::new(bytes)
-        .map_err(|error| DlsError::Invalid(format!("cannot read WAV {name:?}: {error}")))?;
+        .map_err(|error| SoundfontError::Invalid(format!("cannot read WAV {name:?}: {error}")))?;
     let spec = reader.spec();
     if spec.channels == 0 || spec.channels > MAX_CHANNELS {
-        return Err(DlsError::Unsupported(format!(
+        return Err(SoundfontError::Unsupported(format!(
             "WAV {name:?} has {} channels; only mono and stereo are supported",
             spec.channels
         )));
     }
     if spec.sample_rate == 0 {
-        return Err(DlsError::Invalid(format!("WAV {name:?} has no sample rate")));
+        return Err(SoundfontError::Invalid(format!("WAV {name:?} has no sample rate")));
     }
 
     let samples = decode_samples(reader, &name)?;
     if samples.is_empty() {
-        return Err(DlsError::Invalid(format!("WAV {name:?} contains no audio")));
+        return Err(SoundfontError::Invalid(format!("WAV {name:?} contains no audio")));
     }
     if samples.len() % usize::from(spec.channels) != 0 {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "WAV {name:?} ends on a partial frame"
         )));
     }
@@ -93,9 +93,9 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, DlsError> {
 fn decode_samples(
     reader: hound::WavReader<impl std::io::Read>,
     name: &str,
-) -> Result<Vec<f32>, DlsError> {
+) -> Result<Vec<f32>, SoundfontError> {
     let spec = reader.spec();
-    let invalid = |error: hound::Error| DlsError::Invalid(format!("WAV {name:?}: {error}"));
+    let invalid = |error: hound::Error| SoundfontError::Invalid(format!("WAV {name:?}: {error}"));
     match (spec.sample_format, spec.bits_per_sample) {
         (hound::SampleFormat::Float, 32) => reader
             .into_samples::<f32>()
@@ -110,7 +110,7 @@ fn decode_samples(
                 .map(|sample| sample.map(|value| value as f32 * scale).map_err(invalid))
                 .collect()
         }
-        (format, bits) => Err(DlsError::Unsupported(format!(
+        (format, bits) => Err(SoundfontError::Unsupported(format!(
             "WAV {name:?} is {bits}-bit {format:?}"
         ))),
     }

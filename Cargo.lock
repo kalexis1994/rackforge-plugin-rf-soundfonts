@@ -441,13 +441,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "rackforge-rf-dls"
+name = "rackforge-rf-soundfonts"
 version = "0.1.0"
 dependencies = [
  "hound",
  "rackforge-dsp",
  "rackforge-plugin-api",
- "rf-dls",
+ "rf-soundfonts",
  "serde",
  "serde_json",
 ]
@@ -470,7 +470,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rf-dls"
+name = "rf-soundfonts"
 version = "0.1.0"
 dependencies = [
  "alsa",

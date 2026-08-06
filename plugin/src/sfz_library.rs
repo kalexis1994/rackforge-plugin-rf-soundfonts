@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rf_dls::sfz::instrument::{CcState, SfzInstrument};
-use rf_dls::streamer::Streamer;
-use rf_dls::Voice;
+use rf_soundfonts::sfz::instrument::{CcState, SfzInstrument};
+use rf_soundfonts::streamer::Streamer;
+use rf_soundfonts::Voice;
 
 /// Extension identifying an instrument definition.
 const SFZ_EXTENSION: &str = "sfz";
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn a_directory_without_instruments_loads_empty() {
-        let root = std::env::temp_dir().join(format!("rf-dls-lib-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rf-soundfonts-lib-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("readme.txt"), "not an instrument").unwrap();
@@ -337,7 +337,7 @@ mod tests {
         // The layout libraries actually ship in: a folder per library, with
         // definitions beside a samples directory. Searching only the top level
         // would find nothing here.
-        let root = std::env::temp_dir().join(format!("rf-dls-nested-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rf-soundfonts-nested-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         install(&root.join("HeadroomPiano"), "Headroom Piano");
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn two_libraries_may_hold_instruments_of_the_same_name() {
-        let root = std::env::temp_dir().join(format!("rf-dls-samename-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rf-soundfonts-samename-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         install(&root.join("LibraryA"), "Piano");
@@ -370,11 +370,11 @@ mod tests {
 
     #[test]
     fn the_cache_directory_is_not_mistaken_for_a_library() {
-        let root = std::env::temp_dir().join(format!("rf-dls-cachedir-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rf-soundfonts-cachedir-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         install(&root.join("Real"), "Piano");
-        fs::create_dir_all(root.join(".rf-dls-cache")).unwrap();
+        fs::create_dir_all(root.join(".rf-soundfonts-cache")).unwrap();
 
         let (library, failures) = SfzLibrary::load(&root);
         assert!(failures.is_empty(), "{failures:?}");
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn one_broken_instrument_does_not_hide_the_others() {
-        let root = std::env::temp_dir().join(format!("rf-dls-lib-mixed-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rf-soundfonts-lib-mixed-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("broken.sfz"), "<region> sample=missing.wav").unwrap();

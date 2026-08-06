@@ -1,6 +1,6 @@
 [package]
-name = "rf-dls"
-description = "Generic DLS Level 1/2 sample engine used by the RackForge RF-DLS plugin"
+name = "rf-soundfonts"
+description = "Sample engine for the RackForge RF-Soundfonts plugin: DLS collections, SFZ instruments, WAV and FLAC"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,13 +18,13 @@ libc = "0.2"
 midir = "0.11"
 
 [lib]
-name = "rf_dls"
+name = "rf_soundfonts"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rf-dls"
+name = "rf-soundfonts"
 path = "src/main.rs"
 
 [[bin]]
-name = "rf-dls-live"
-path = "src/bin/rf_dls_live.rs"
+name = "rf-soundfonts-live"
+path = "src/bin/rf_soundfonts_live.rs"

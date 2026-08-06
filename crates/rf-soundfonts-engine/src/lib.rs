@@ -39,7 +39,7 @@ const CONN_DST_EG2_RELEASETIME: u16 = 0x030d;
 const CONN_DST_EG2_SUSTAINLEVEL: u16 = 0x030e;
 
 #[derive(Debug, Error)]
-pub enum DlsError {
+pub enum SoundfontError {
     #[error("cannot read {path}: {source}")]
     Read {
         path: String,
@@ -108,15 +108,15 @@ fn parse_chunks(
     start: usize,
     end: usize,
     depth: usize,
-) -> Result<Vec<Chunk>, DlsError> {
+) -> Result<Vec<Chunk>, SoundfontError> {
     if depth > 12 {
-        return Err(DlsError::Invalid("RIFF nesting exceeds 12 levels".into()));
+        return Err(SoundfontError::Invalid("RIFF nesting exceeds 12 levels".into()));
     }
     let mut chunks = Vec::new();
     let mut cursor = start;
     while cursor < end {
         if end - cursor < 8 {
-            return Err(DlsError::Invalid(format!(
+            return Err(SoundfontError::Invalid(format!(
                 "truncated chunk header at 0x{cursor:x}"
             )));
         }
@@ -127,14 +127,14 @@ fn parse_chunks(
             .checked_add(size)
             .filter(|value| *value <= end)
             .ok_or_else(|| {
-                DlsError::Invalid(format!(
+                SoundfontError::Invalid(format!(
                     "chunk {:?} at 0x{cursor:x} exceeds its container",
                     String::from_utf8_lossy(&id)
                 ))
             })?;
         let (kind, payload_start, payload_len, children) = if id == *b"RIFF" || id == *b"LIST" {
             if size < 4 {
-                return Err(DlsError::Invalid(format!(
+                return Err(SoundfontError::Invalid(format!(
                     "container at 0x{cursor:x} is shorter than its form type"
                 )));
             }
@@ -157,7 +157,7 @@ fn parse_chunks(
         });
         cursor = data_end + (size & 1);
         if cursor > end {
-            return Err(DlsError::Invalid(format!(
+            return Err(SoundfontError::Invalid(format!(
                 "padding after chunk at 0x{:x} exceeds its container",
                 data_start - 8
             )));
@@ -166,9 +166,9 @@ fn parse_chunks(
     Ok(chunks)
 }
 
-fn require_size(data: &[u8], minimum: usize, label: &str) -> Result<(), DlsError> {
+fn require_size(data: &[u8], minimum: usize, label: &str) -> Result<(), SoundfontError> {
     if data.len() < minimum {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "{label} has {} bytes; expected at least {minimum}",
             data.len()
         )));
@@ -205,12 +205,12 @@ pub struct SampleParams {
     pub sample_loop: Option<SampleLoop>,
 }
 
-fn parse_wsmp(chunk: &Chunk, bytes: &[u8]) -> Result<SampleParams, DlsError> {
+fn parse_wsmp(chunk: &Chunk, bytes: &[u8]) -> Result<SampleParams, SoundfontError> {
     let data = chunk.data(bytes);
     require_size(data, 20, "wsmp")?;
     let header_size = u32_at(data, 0) as usize;
     if !(20..=data.len()).contains(&header_size) {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "wsmp header size {header_size} is invalid"
         )));
     }
@@ -221,11 +221,11 @@ fn parse_wsmp(chunk: &Chunk, bytes: &[u8]) -> Result<SampleParams, DlsError> {
         require_size(&data[header_size..], 16, "wsmp loop")?;
         let loop_size = u32_at(data, header_size) as usize;
         if loop_size < 16 || header_size + loop_size > data.len() {
-            return Err(DlsError::Invalid("wsmp loop size is invalid".into()));
+            return Err(SoundfontError::Invalid("wsmp loop size is invalid".into()));
         }
         let loop_type = u32_at(data, header_size + 4);
         if loop_type > 1 {
-            return Err(DlsError::Unsupported(format!(
+            return Err(SoundfontError::Unsupported(format!(
                 "sample loop type {loop_type}"
             )));
         }
@@ -235,7 +235,7 @@ fn parse_wsmp(chunk: &Chunk, bytes: &[u8]) -> Result<SampleParams, DlsError> {
             start,
             end: start
                 .checked_add(length)
-                .ok_or_else(|| DlsError::Invalid("sample loop overflows usize".into()))?,
+                .ok_or_else(|| SoundfontError::Invalid("sample loop overflows usize".into()))?,
         })
     };
     let attenuation_units = i32_at(data, 8) as f32 / 65_536.0;
@@ -391,7 +391,7 @@ fn apply_articulation_connection(
 fn parse_articulation(
     container: &Chunk,
     bytes: &[u8],
-) -> Result<(EnvelopeSpec, PitchEnvelopeSpec, LfoSpec), DlsError> {
+) -> Result<(EnvelopeSpec, PitchEnvelopeSpec, LfoSpec), SoundfontError> {
     let mut amplitude = EnvelopeSpec::default();
     let mut pitch = PitchEnvelopeSpec::default();
     let mut lfo = LfoSpec::default();
@@ -410,9 +410,9 @@ fn parse_articulation(
     let count = u32_at(data, 4) as usize;
     let required = header_size
         .checked_add(count.saturating_mul(12))
-        .ok_or_else(|| DlsError::Invalid("articulator size overflows".into()))?;
+        .ok_or_else(|| SoundfontError::Invalid("articulator size overflows".into()))?;
     if header_size < 8 || required > data.len() {
-        return Err(DlsError::Invalid(
+        return Err(SoundfontError::Invalid(
             "articulator connection table is truncated".into(),
         ));
     }
@@ -556,32 +556,32 @@ pub struct DlsBank {
 }
 
 impl DlsBank {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, DlsError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, SoundfontError> {
         let path = path.as_ref();
-        let bytes = fs::read(path).map_err(|source| DlsError::Read {
+        let bytes = fs::read(path).map_err(|source| SoundfontError::Read {
             path: path.display().to_string(),
             source,
         })?;
         Self::parse(&bytes)
     }
 
-    pub fn parse(bytes: &[u8]) -> Result<Self, DlsError> {
+    pub fn parse(bytes: &[u8]) -> Result<Self, SoundfontError> {
         let roots = parse_chunks(bytes, 0, bytes.len(), 0)?;
         if roots.len() != 1 || !roots[0].is(b"RIFF") || !roots[0].is_list(b"DLS ") {
-            return Err(DlsError::Invalid(
+            return Err(SoundfontError::Invalid(
                 "file is not a RIFF DLS collection".into(),
             ));
         }
         let root = &roots[0];
         let pool_table = root
             .child(b"ptbl")
-            .ok_or_else(|| DlsError::Invalid("missing ptbl".into()))?;
+            .ok_or_else(|| SoundfontError::Invalid("missing ptbl".into()))?;
         let pool = pool_table.data(bytes);
         require_size(pool, 8, "ptbl")?;
         let pool_header = u32_at(pool, 0) as usize;
         let cue_count = u32_at(pool, 4) as usize;
         if pool_header < 8 || pool_header + cue_count.saturating_mul(4) > pool.len() {
-            return Err(DlsError::Invalid("ptbl cue table is truncated".into()));
+            return Err(SoundfontError::Invalid("ptbl cue table is truncated".into()));
         }
         let cues = (0..cue_count)
             .map(|index| u32_at(pool, pool_header + index * 4) as usize)
@@ -589,7 +589,7 @@ impl DlsBank {
 
         let wave_pool = root
             .list(b"wvpl")
-            .ok_or_else(|| DlsError::Invalid("missing LIST wvpl".into()))?;
+            .ok_or_else(|| SoundfontError::Invalid("missing LIST wvpl".into()))?;
         let wave_pool_start = wave_pool.payload_start;
         let wave_chunks = wave_pool
             .children
@@ -602,21 +602,21 @@ impl DlsBank {
                 .payload_start
                 .checked_sub(12)
                 .and_then(|start| start.checked_sub(wave_pool_start))
-                .ok_or_else(|| DlsError::Invalid("wave pool relative offset underflows".into()))?;
+                .ok_or_else(|| SoundfontError::Invalid("wave pool relative offset underflows".into()))?;
             waves_by_offset.insert(relative, parse_wave(wave, bytes)?);
         }
         let waves = cues
             .iter()
             .map(|cue| {
                 waves_by_offset.get(cue).cloned().ok_or_else(|| {
-                    DlsError::Invalid(format!("ptbl cue 0x{cue:x} does not select a wave"))
+                    SoundfontError::Invalid(format!("ptbl cue 0x{cue:x} does not select a wave"))
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         let instrument_list = root
             .list(b"lins")
-            .ok_or_else(|| DlsError::Invalid("missing LIST lins".into()))?;
+            .ok_or_else(|| SoundfontError::Invalid("missing LIST lins".into()))?;
         let instruments = instrument_list
             .children
             .iter()
@@ -624,7 +624,7 @@ impl DlsBank {
             .map(|chunk| parse_instrument(chunk, bytes, waves.len()))
             .collect::<Result<Vec<_>, _>>()?;
         if instruments.is_empty() || waves.is_empty() {
-            return Err(DlsError::Invalid(
+            return Err(SoundfontError::Invalid(
                 "DLS collection has no instruments or waves".into(),
             ));
         }
@@ -638,10 +638,10 @@ impl DlsBank {
     }
 }
 
-fn parse_wave(chunk: &Chunk, bytes: &[u8]) -> Result<Wave, DlsError> {
+fn parse_wave(chunk: &Chunk, bytes: &[u8]) -> Result<Wave, SoundfontError> {
     let format = chunk
         .child(b"fmt ")
-        .ok_or_else(|| DlsError::Invalid("wave is missing fmt".into()))?
+        .ok_or_else(|| SoundfontError::Invalid("wave is missing fmt".into()))?
         .data(bytes);
     require_size(format, 16, "wave fmt")?;
     let format_tag = u16_at(format, 0);
@@ -653,34 +653,34 @@ fn parse_wave(chunk: &Chunk, bytes: &[u8]) -> Result<Wave, DlsError> {
     // requires that any more, and rejecting a stereo wave a bank happens to
     // carry would fail the whole collection over one sample.
     if format_tag != 1 || !(1..=2).contains(&channels) || bits != 16 {
-        return Err(DlsError::Unsupported(format!(
+        return Err(SoundfontError::Unsupported(format!(
             "wave format tag={format_tag} channels={channels} bits={bits} align={block_align}"
         )));
     }
     if usize::from(block_align) != usize::from(channels) * 2 {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "wave block align {block_align} does not match {channels} channels of PCM16"
         )));
     }
     if sample_rate == 0 {
-        return Err(DlsError::Invalid("wave sample rate is zero".into()));
+        return Err(SoundfontError::Invalid("wave sample rate is zero".into()));
     }
     let raw = chunk
         .child(b"data")
-        .ok_or_else(|| DlsError::Invalid("wave is missing data".into()))?
+        .ok_or_else(|| SoundfontError::Invalid("wave is missing data".into()))?
         .data(bytes);
     if raw.len() % 2 != 0 {
-        return Err(DlsError::Invalid("PCM16 wave has an odd data size".into()));
+        return Err(SoundfontError::Invalid("PCM16 wave has an odd data size".into()));
     }
     let samples = raw
         .chunks_exact(2)
         .map(|sample| i16::from_le_bytes(sample.try_into().unwrap()) as f32 / 32_768.0)
         .collect::<Vec<_>>();
     if samples.is_empty() {
-        return Err(DlsError::Invalid("wave contains no samples".into()));
+        return Err(SoundfontError::Invalid("wave contains no samples".into()));
     }
     if samples.len() % usize::from(channels) != 0 {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "PCM16 wave holds a partial frame for {channels} channels"
         )));
     }
@@ -692,7 +692,7 @@ fn parse_wave(chunk: &Chunk, bytes: &[u8]) -> Result<Wave, DlsError> {
     if let Some(sample_loop) = sample_params.and_then(|params| params.sample_loop)
         && (sample_loop.start >= sample_loop.end || sample_loop.end > frames)
     {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "wave loop {}..{} exceeds {frames} frames",
             sample_loop.start, sample_loop.end,
         )));
@@ -711,10 +711,10 @@ fn parse_instrument(
     chunk: &Chunk,
     bytes: &[u8],
     wave_count: usize,
-) -> Result<Instrument, DlsError> {
+) -> Result<Instrument, SoundfontError> {
     let header = chunk
         .child(b"insh")
-        .ok_or_else(|| DlsError::Invalid("instrument is missing insh".into()))?
+        .ok_or_else(|| SoundfontError::Invalid("instrument is missing insh".into()))?
         .data(bytes);
     require_size(header, 12, "insh")?;
     let declared_regions = u32_at(header, 0) as usize;
@@ -722,7 +722,7 @@ fn parse_instrument(
     let program = u32_at(header, 8);
     let region_list = chunk
         .list(b"lrgn")
-        .ok_or_else(|| DlsError::Invalid("instrument is missing LIST lrgn".into()))?;
+        .ok_or_else(|| SoundfontError::Invalid("instrument is missing LIST lrgn".into()))?;
     let regions = region_list
         .children
         .iter()
@@ -730,7 +730,7 @@ fn parse_instrument(
         .map(|region| parse_region(region, bytes, wave_count))
         .collect::<Result<Vec<_>, _>>()?;
     if regions.len() != declared_regions {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "instrument declares {declared_regions} regions but contains {}",
             regions.len()
         )));
@@ -747,20 +747,20 @@ fn parse_instrument(
     })
 }
 
-fn parse_region(chunk: &Chunk, bytes: &[u8], wave_count: usize) -> Result<Region, DlsError> {
+fn parse_region(chunk: &Chunk, bytes: &[u8], wave_count: usize) -> Result<Region, SoundfontError> {
     let header = chunk
         .child(b"rgnh")
-        .ok_or_else(|| DlsError::Invalid("region is missing rgnh".into()))?
+        .ok_or_else(|| SoundfontError::Invalid("region is missing rgnh".into()))?
         .data(bytes);
     require_size(header, 12, "rgnh")?;
     let wave_link = chunk
         .child(b"wlnk")
-        .ok_or_else(|| DlsError::Invalid("region is missing wlnk".into()))?
+        .ok_or_else(|| SoundfontError::Invalid("region is missing wlnk".into()))?
         .data(bytes);
     require_size(wave_link, 12, "wlnk")?;
     let wave_index = u32_at(wave_link, 8) as usize;
     if wave_index >= wave_count {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "region selects wave {wave_index}, but collection has {wave_count}"
         )));
     }
@@ -1031,7 +1031,7 @@ impl Voice {
         note: u8,
         velocity: u8,
         output_rate: u32,
-    ) -> Result<Self, DlsError> {
+    ) -> Result<Self, SoundfontError> {
         Self::new_with_envelope(
             bank,
             instrument,
@@ -1051,7 +1051,7 @@ impl Voice {
         velocity: u8,
         output_rate: u32,
         envelope: EnvelopeSpec,
-    ) -> Result<Self, DlsError> {
+    ) -> Result<Self, SoundfontError> {
         let mut config = VoiceConfig::inherit(instrument);
         config.amplitude_envelope = envelope;
         Self::new_with_config(
@@ -1073,10 +1073,10 @@ impl Voice {
         velocity: u8,
         output_rate: u32,
         config: VoiceConfig,
-    ) -> Result<Self, DlsError> {
+    ) -> Result<Self, SoundfontError> {
         let wave = &bank.waves[region.wave_index];
         let params = region.sample_params.or(wave.sample_params).ok_or_else(|| {
-            DlsError::Unsupported(format!(
+            SoundfontError::Unsupported(format!(
                 "region for instrument {:?} has no wsmp parameters",
                 instrument.name
             ))
@@ -1098,9 +1098,9 @@ impl Voice {
         velocity: u8,
         output_rate: u32,
         config: VoiceConfig,
-    ) -> Result<Self, DlsError> {
+    ) -> Result<Self, SoundfontError> {
         if params.unity_note > 127 {
-            return Err(DlsError::Invalid(format!(
+            return Err(SoundfontError::Invalid(format!(
                 "unity note {} is outside MIDI range",
                 params.unity_note
             )));
@@ -1109,7 +1109,7 @@ impl Voice {
         if let Some(sample_loop) = params.sample_loop
             && (sample_loop.start >= sample_loop.end || sample_loop.end > frame_count)
         {
-            return Err(DlsError::Invalid(format!(
+            return Err(SoundfontError::Invalid(format!(
                 "loop {}..{} exceeds wave {:?} length {frame_count} frames",
                 sample_loop.start, sample_loop.end, wave.name,
             )));
@@ -1294,7 +1294,7 @@ impl Voice {
         velocity: u8,
         output_rate: u32,
         config: VoiceConfig,
-    ) -> Result<Self, DlsError> {
+    ) -> Result<Self, SoundfontError> {
         let channels = usize::from(sample.channels).max(1);
         // The head is presented to the renderer as an ordinary resident wave,
         // so everything below the read path is unchanged whether the audio is
@@ -1394,7 +1394,7 @@ pub fn voices_for_note(
     note: u8,
     velocity: u8,
     output_rate: u32,
-) -> Result<Vec<Voice>, DlsError> {
+) -> Result<Vec<Voice>, SoundfontError> {
     instrument
         .matching_regions(note, velocity)
         .map(|region| Voice::new(bank, instrument, region, note, velocity, output_rate))

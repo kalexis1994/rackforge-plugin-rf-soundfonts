@@ -24,13 +24,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::DlsError;
+use crate::SoundfontError;
 
 /// Includes may nest; a cycle would otherwise recurse until the stack ends.
 const MAX_INCLUDE_DEPTH: usize = 16;
 
 /// Expands `#define` and `#include` into a single self-contained document.
-pub fn expand(root: &Path) -> Result<String, DlsError> {
+pub fn expand(root: &Path) -> Result<String, SoundfontError> {
     let base = root.parent().unwrap_or(Path::new(".")).to_path_buf();
     let source = read(root)?;
     let mut macros = BTreeMap::new();
@@ -44,14 +44,14 @@ pub fn expand_text(
     source: &str,
     base: &Path,
     macros: &mut BTreeMap<String, String>,
-) -> Result<String, DlsError> {
+) -> Result<String, SoundfontError> {
     let mut output = String::with_capacity(source.len() * 2);
     expand_into(source, base, macros, &mut output, 0)?;
     Ok(output)
 }
 
-fn read(path: &Path) -> Result<String, DlsError> {
-    let bytes = fs::read(path).map_err(|source| DlsError::Read {
+fn read(path: &Path) -> Result<String, SoundfontError> {
+    let bytes = fs::read(path).map_err(|source| SoundfontError::Read {
         path: path.display().to_string(),
         source,
     })?;
@@ -66,9 +66,9 @@ fn expand_into(
     macros: &mut BTreeMap<String, String>,
     output: &mut String,
     depth: usize,
-) -> Result<(), DlsError> {
+) -> Result<(), SoundfontError> {
     if depth > MAX_INCLUDE_DEPTH {
-        return Err(DlsError::Invalid(format!(
+        return Err(SoundfontError::Invalid(format!(
             "SFZ includes nest deeper than {MAX_INCLUDE_DEPTH} levels"
         )));
     }
@@ -85,7 +85,7 @@ fn expand_line(
     macros: &mut BTreeMap<String, String>,
     output: &mut String,
     depth: usize,
-) -> Result<(), DlsError> {
+) -> Result<(), SoundfontError> {
     let line = strip_comment(line);
     let mut rest = line;
     loop {
@@ -100,7 +100,7 @@ fn expand_line(
                 let (name, after) = take_token(after);
                 let (value, after) = take_token(after);
                 if name.is_empty() {
-                    return Err(DlsError::Invalid("#define is missing a macro name".into()));
+                    return Err(SoundfontError::Invalid("#define is missing a macro name".into()));
                 }
                 // The value is substituted now so a macro defined in terms of
                 // another resolves against what was in scope at definition.
@@ -110,7 +110,7 @@ fn expand_line(
             Directive::Include => {
                 let after = &rest[directive.end..];
                 let (path, after) = take_quoted(after).ok_or_else(|| {
-                    DlsError::Invalid("#include is missing a quoted path".into())
+                    SoundfontError::Invalid("#include is missing a quoted path".into())
                 })?;
                 let resolved = resolve(base, &substitute(path, macros));
                 let included = read(&resolved)?;
@@ -343,13 +343,13 @@ mod tests {
     /// right ones, against a document nobody on this project wrote.
     ///
     /// ```text
-    /// RF_DLS_SFZ="/path/to/Headroom Piano (NoFX).sfz" cargo test -- --ignored
+    /// RF_SOUNDFONTS_SFZ="/path/to/Headroom Piano (NoFX).sfz" cargo test -- --ignored
     /// ```
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn expands_a_real_library() {
-        let Ok(path) = std::env::var("RF_DLS_SFZ") else {
-            panic!("set RF_DLS_SFZ to an .sfz file");
+        let Ok(path) = std::env::var("RF_SOUNDFONTS_SFZ") else {
+            panic!("set RF_SOUNDFONTS_SFZ to an .sfz file");
         };
         let expanded = expand(Path::new(&path)).unwrap();
         assert!(!expanded.contains('$'), "unexpanded macros remain");
@@ -369,7 +369,7 @@ mod tests {
 
     fn tempdir() -> PathBuf {
         let base = std::env::temp_dir().join(format!(
-            "rf-dls-sfz-{}-{:?}",
+            "rf-soundfonts-sfz-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
