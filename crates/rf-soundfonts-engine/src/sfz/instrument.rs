@@ -184,8 +184,24 @@ impl SampledInstrument {
             )));
         }
 
+        // A sample a region loops has to be held whole. The store decides that
+        // for itself when the audio carries a `smpl` chunk, but an SFZ can
+        // state the loop in the document instead — a converted library
+        // routinely does — and then nothing in the file gives the store any
+        // reason to keep the tail. It would preload the head, and the voice
+        // would be asked to jump back into memory nobody kept.
+        let mut needs_residency: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for opcodes in &document.regions {
+            if let Some(relative) = opcodes.get("sample")
+                && opcodes.contains_key("loop_end")
+            {
+                needs_residency.insert(relative.clone());
+            }
+        }
+
         let store = SampleStore::beside(root);
-        let samples = store.load_all(root, &default_path, &order, &Default::default())?;
+        let samples = store.load_all(root, &default_path, &order, &needs_residency)?;
 
         let mut regions = Vec::new();
         for opcodes in &document.regions {
@@ -486,7 +502,14 @@ fn loop_from(opcodes: &OpcodeMap, sample: &StreamedSample) -> Option<crate::Samp
         }
         None => return None,
     };
-    (start < end && end <= sample.frame_count).then_some(crate::SampleLoop { start, end })
+    // A loop is also dropped when the sample did not end up resident. Playback
+    // moves backwards through a loop and the streaming window only moves
+    // forward, so a loop pointing past the resident head is one the voice
+    // could never reach. Better a note that stops than a note that refuses to
+    // start: a voice that cannot be built is an instrument that says nothing.
+    let reachable = sample.is_fully_resident();
+    (start < end && end <= sample.frame_count && reachable)
+        .then_some(crate::SampleLoop { start, end })
 }
 
 fn gates_from(opcodes: &OpcodeMap) -> Vec<CcGate> {
@@ -835,6 +858,46 @@ mod tests {
         );
         let looping = region.sample_loop.unwrap();
         assert_eq!((looping.start, looping.end), (2, 6));
+    }
+
+    /// A sample of `frames` with only its head in memory.
+    fn streamed_wave(frames: usize, resident: usize) -> StreamedSample {
+        let mut sample = silent_wave(frames);
+        sample.preload = std::sync::Arc::from(vec![0.0; resident * 2]);
+        sample.preload_frames = resident;
+        sample
+    }
+
+    #[test]
+    fn a_loop_beyond_what_is_resident_is_discarded() {
+        // Converted libraries state the loop in the document while the audio
+        // carries no markers, so the store has no reason to keep the tail. A
+        // voice cannot jump back into memory nobody kept, and refusing to
+        // build the voice would silence the instrument rather than shorten it.
+        let region = region_from(
+            &opcodes(&[
+                ("sample", "a.wav"),
+                ("loop_start", "23464"),
+                ("loop_end", "58620"),
+            ]),
+            0,
+            &streamed_wave(94_473, crate::sample_store::PRELOAD_FRAMES),
+        );
+        assert!(region.sample_loop.is_none());
+    }
+
+    #[test]
+    fn a_loop_inside_a_resident_sample_survives() {
+        let region = region_from(
+            &opcodes(&[
+                ("sample", "a.wav"),
+                ("loop_start", "23464"),
+                ("loop_end", "58620"),
+            ]),
+            0,
+            &silent_wave(94_473),
+        );
+        assert!(region.sample_loop.is_some());
     }
 
     #[test]
