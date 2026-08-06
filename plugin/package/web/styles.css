@@ -1470,3 +1470,215 @@ body {
     gap: 7px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Library browser
+
+   Libraries first, instruments inside. The surface used to show two fixed
+   collections that no longer describe anything installed, while the ten real
+   libraries the plugin publishes went unmentioned.
+
+   Every card carries a cover drawn from the instrument's own numbers, so a
+   library nobody shipped artwork for still looks like something. The grid is
+   sized in the card rather than in a breakpoint: `auto-fill` with a minimum
+   width lands on one column in a phone and four on a desktop without either
+   being named here.
+--------------------------------------------------------------------------- */
+
+.library-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.browser-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.library-grid,
+.instrument-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(184px, 1fr));
+  gap: 12px;
+}
+
+.library-card,
+.instrument-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+  background: var(--glass, var(--paper));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+
+.library-card:hover,
+.instrument-card:hover,
+.library-card:focus-visible,
+.instrument-card:focus-visible {
+  border-color: var(--acid);
+}
+
+/* Touch targets stay where they are put. A card that lifts under the finger
+   is a card that has moved by the time the tap lands. */
+@media (hover: hover) {
+  .library-card:hover,
+  .instrument-card:hover {
+    transform: translateY(-1px);
+  }
+}
+
+.instrument-card.selected,
+.library-card.holds-selected {
+  border-color: var(--acid);
+  box-shadow: inset 0 0 0 1px var(--acid);
+}
+
+.cover {
+  display: block;
+  width: 100%;
+  aspect-ratio: 320 / 116;
+  /* A recessed panel, not a lit one. The palette's --ink is the bright end
+     of this theme, so mixing towards it would have made every cover a white
+     rectangle with pale keys on it. */
+  background: color-mix(in srgb, var(--paper) 55%, #000);
+  border-bottom: 1px solid var(--line);
+}
+
+.cover svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.cover-empty {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--paper) 55%, #000),
+    color-mix(in srgb, var(--paper) 55%, #000) 6px,
+    color-mix(in srgb, var(--paper) 75%, #000) 6px,
+    color-mix(in srgb, var(--paper) 75%, #000) 12px
+  );
+}
+
+/* The keys nobody recorded, the keys that still answer, and the keys that were
+   actually played. Three weights of the same shape, so the eye reads the
+   recorded span first. */
+.cover-mute {
+  fill: color-mix(in srgb, var(--muted) 26%, transparent);
+}
+
+.cover-reachable {
+  fill: color-mix(in srgb, var(--muted) 62%, transparent);
+}
+
+.cover-recorded {
+  fill: var(--acid);
+}
+
+.cover-layer {
+  fill: var(--orange);
+}
+
+.card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 11px 11px;
+  min-width: 0;
+}
+
+.card-meta strong {
+  font-size: 0.86rem;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-meta small {
+  font-size: 0.68rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-meta small.origin {
+  color: var(--acid);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.6rem;
+}
+
+.instrument-status {
+  padding: 0 11px 10px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.instrument-card.selected .instrument-status {
+  color: var(--acid);
+}
+
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 8px 14px 8px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.crumb:hover,
+.crumb:focus-visible {
+  border-color: var(--acid);
+}
+
+.crumb-arrow {
+  font-size: 0.95rem;
+  line-height: 1;
+  color: var(--acid);
+}
+
+/* On a phone the browser is read at arm's length and often in the dark, so
+   the cards grow rather than shrink and the labels come up with them. */
+@media (max-width: 560px) {
+  .library-grid,
+  .instrument-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .card-meta strong {
+    font-size: 0.98rem;
+  }
+
+  .card-meta small {
+    font-size: 0.76rem;
+  }
+
+  .instrument-status {
+    font-size: 0.66rem;
+  }
+
+  .crumb {
+    padding: 11px 18px 11px 14px;
+    font-size: 0.88rem;
+  }
+}

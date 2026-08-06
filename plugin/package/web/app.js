@@ -8,6 +8,7 @@
   let context = null;
   let sequence = 0;
   let activeCollection = "dls";
+  let openLibrary = null;
   let searchQuery = "";
   let configSearchQuery = "";
   let activeDraftId = null;
@@ -250,7 +251,7 @@
       {
         protocol: PROTOCOL,
         kind: "request",
-        request_id: `rf-dls-${sequence}`,
+        request_id: `rf-soundfonts-${sequence}`,
         method,
         params,
       },
@@ -327,7 +328,7 @@
       node(
         "p",
         "",
-        `${instance.sounds.length} programs · DLS instrument engine`,
+        summariseInstall(instance),
       ),
     );
     const badge = node("span", "api-badge", "WEB API 1");
@@ -335,135 +336,321 @@
     return header;
   }
 
+  /// Lowest and highest key of an eighty-eight note keyboard.
+  const KEYBOARD_LOW = 21;
+  const KEYBOARD_HIGH = 108;
+  const BLACK_KEYS = [1, 3, 6, 8, 10];
+  const NOTE_NAMES = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+  ];
+
+  function noteName(note) {
+    return `${NOTE_NAMES[note % 12]}${Math.floor(note / 12) - 1}`;
+  }
+
+  /// Reads the marks the plugin attached to a sound.
+  ///
+  /// Only this plugin writes them and only this surface reads them, so the
+  /// shape is ours. Anything missing comes back null rather than zero: an
+  /// instrument that reported nothing is not an instrument with no keys, and a
+  /// cover drawn from invented numbers would look confidently wrong.
+  function factsOf(sound) {
+    const marks = sound.tags ?? [];
+    const value = (name) => {
+      const hit = marks.find((mark) => mark.startsWith(`${name}:`));
+      return hit ? hit.slice(name.length + 1) : null;
+    };
+    const span = (name) => {
+      const raw = value(name);
+      if (!raw) return null;
+      const [low, high] = raw.split("-").map(Number);
+      return Number.isFinite(low) && Number.isFinite(high) ? [low, high] : null;
+    };
+    const count = (name) => {
+      const raw = Number(value(name));
+      return Number.isFinite(raw) ? raw : null;
+    };
+    return {
+      keys: span("keys"),
+      roots: span("roots"),
+      zones: count("zones"),
+      samples: count("samples"),
+      layers: count("layers"),
+      bytes: count("bytes"),
+      looping: marks.includes("looping"),
+    };
+  }
+
+  /// Draws an instrument as the keyboard it covers.
+  ///
+  /// Two ranges, because they say different things. The pale one is every key
+  /// that answers, which for a converted library is usually the whole
+  /// keyboard. The bright one is where the recordings actually are, and that
+  /// is what tells one trumpet from another. Velocity layers stack above it,
+  /// so an instrument with five ways to strike a note looks unlike one with a
+  /// single sample per key.
+  function coverArt(facts) {
+    const W = 320;
+    const H = 116;
+    const PAD = 10;
+    const span = W - PAD * 2;
+    const at = (note) =>
+      PAD + ((note - KEYBOARD_LOW) / (KEYBOARD_HIGH - KEYBOARD_LOW)) * span;
+    const width = span / (KEYBOARD_HIGH - KEYBOARD_LOW + 1);
+
+    const reach = facts.keys ?? [KEYBOARD_LOW, KEYBOARD_HIGH];
+    const roots = facts.roots ?? reach;
+    let keys = "";
+    for (let note = KEYBOARD_LOW; note <= KEYBOARD_HIGH; note += 1) {
+      const black = BLACK_KEYS.includes(note % 12);
+      const recorded = note >= roots[0] && note <= roots[1];
+      const reachable = note >= reach[0] && note <= reach[1];
+      keys += `<rect x="${at(note).toFixed(1)}" y="${black ? H - 46 : H - 34}"
+        width="${(width * 0.78).toFixed(2)}" height="${black ? 20 : 26}" rx="1"
+        class="${recorded ? "cover-recorded" : reachable ? "cover-reachable" : "cover-mute"}"/>`;
+    }
+
+    let bands = "";
+    const layers = Math.min(facts.layers ?? 1, 8);
+    for (let layer = 0; layer < layers; layer += 1) {
+      const height = 6;
+      const gap = 3;
+      bands += `<rect x="${at(roots[0]).toFixed(1)}"
+        y="${H - 56 - (layer + 1) * (height + gap)}"
+        width="${Math.max(width, at(roots[1]) - at(roots[0])).toFixed(1)}"
+        height="${height}" rx="2" class="cover-layer"
+        opacity="${(0.30 + layer * 0.14).toFixed(2)}"/>`;
+    }
+
+    const holder = node("div", "cover");
+    holder.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
+      role="img" aria-hidden="true">${bands}${keys}</svg>`;
+    return holder;
+  }
+
+  function memoryText(bytes) {
+    if (bytes === null) return "";
+    return bytes >= 1048576
+      ? `${Math.round(bytes / 1048576)} MiB`
+      : `${Math.round(bytes / 1024)} KiB`;
+  }
+
+  /// Groups the sounds by the bank they belong to, in the plugin's own order.
+  ///
+  /// Banks arrive as a list with their names because an identifier cannot
+  /// carry one: `Acordeon Hohner Corona II` becomes
+  /// `acordeon-hohner-corona-ii` and no amount of tidying brings the capitals
+  /// back. A sound whose bank was never declared still gets a home rather than
+  /// vanishing from the browser.
+  function librariesOf(instance) {
+    const declared = new Map();
+    (instance.banks ?? []).forEach((bank) => {
+      declared.set(bank.id, { id: bank.id, name: bank.name, order: bank.order ?? 0, sounds: [] });
+    });
+    instance.sounds.forEach((sound) => {
+      const id = sound.bank ?? "";
+      if (!declared.has(id)) {
+        declared.set(id, { id, name: id || "Sin librería", order: 9999, sounds: [] });
+      }
+      declared.get(id).sounds.push(sound);
+    });
+    return [...declared.values()]
+      .filter((library) => library.sounds.length > 0)
+      .sort((left, right) => left.order - right.order);
+  }
+
+  /// One line saying what is installed, for the surface header.
+  function summariseInstall(instance) {
+    const libraries = (instance.banks ?? []).length;
+    const total = instance.sounds.length;
+    const bytes = instance.sounds.reduce(
+      (sum, sound) => sum + (factsOf(sound).bytes ?? 0),
+      0,
+    );
+    const parts = [`${total} instrumento${total === 1 ? "" : "s"}`];
+    if (libraries > 1) {
+      parts.push(`${libraries} librerías`);
+    }
+    if (bytes > 0) {
+      parts.push(memoryText(bytes));
+    }
+    return parts.join(" · ");
+  }
+
   function renderPlay(instance) {
     root.replaceChildren();
     root.append(pluginHeader(instance, "PLAY SURFACE"));
 
+    const libraries = librariesOf(instance);
     const current = selectedSound(instance);
-    const collections = [
-      {
-        id: "dls",
-        label: "DLS",
-        sounds: instance.sounds.filter(
-          (sound) => collectionFor(sound) === "dls",
-        ),
-      },
-      {
-        id: "custom",
-        label: "CUSTOM",
-        sounds: instance.sounds.filter(
-          (sound) => collectionFor(sound) === "custom",
-        ),
-      },
-    ];
-    const collectionTabs = node("nav", "collection-tabs");
-    collectionTabs.setAttribute("aria-label", "Program collections");
-    collections.forEach((collection) => {
-      const tab = node(
-        "button",
-        `collection-tab${collection.id === activeCollection ? " active" : ""}`,
-      );
-      tab.type = "button";
-      tab.setAttribute(
-        "aria-current",
-        collection.id === activeCollection ? "page" : "false",
-      );
-      tab.append(
-        node("strong", "", collection.label),
-        node("span", "", String(collection.sounds.length)),
-      );
-      tab.addEventListener("click", () => {
-        activeCollection = collection.id;
-        searchQuery = "";
-        renderPlay(instance);
-      });
-      collectionTabs.append(tab);
-    });
-    root.append(collectionTabs);
+    const total = instance.sounds.length;
 
-    const currentCard = node("section", "current-program");
-    const currentCopy = node("div");
-    currentCopy.append(
-      node("span", "eyebrow", "CURRENT PROGRAM"),
-      node("h2", "", current?.name ?? "No program selected"),
-      node("p", "", current?.detail ?? current?.bank ?? "DLS"),
-    );
-    currentCard.append(currentCopy, node("span", "pulse", "MIDI READY"));
-    root.append(currentCard);
+    root.append(currentCard(instance, current, libraries));
 
-    const browser = node("section", "program-browser");
+    const browser = node("section", "library-browser");
     const toolbar = node("div", "toolbar");
     const search = node("input");
     search.type = "search";
     search.value = searchQuery;
-    search.placeholder =
-      activeCollection === "custom"
-        ? "Search custom programs"
-        : "Search DLS programs";
-    search.setAttribute("aria-label", "Search programs");
-    const activeSounds =
-      collections.find((collection) => collection.id === activeCollection)
-        ?.sounds ?? [];
-    const count = node("span", "count", `${activeSounds.length} PROGRAMS`);
+    search.placeholder = "Buscar instrumento";
+    search.setAttribute("aria-label", "Buscar instrumento");
+    const count = node("span", "count");
     toolbar.append(search, count);
-    const list = node("div", "program-list");
-    browser.append(toolbar, list);
+    const body = node("div", "browser-body");
+    browser.append(toolbar, body);
     root.append(browser);
 
-    function drawList() {
-      const query = search.value.trim().toLowerCase();
+    function draw() {
       searchQuery = search.value;
-      const sounds = activeSounds.filter(
-        (sound) =>
-          !query ||
-          sound.name.toLowerCase().includes(query) ||
-          (sound.detail ?? "").toLowerCase().includes(query),
-      );
-      count.textContent = `${sounds.length} PROGRAMS`;
-      list.replaceChildren();
-      if (sounds.length === 0) {
-        list.append(
-          node(
-            "p",
-            "empty-collection",
-            activeCollection === "custom"
-              ? "No custom programs yet."
-              : "No DLS programs match this search.",
-          ),
+      const query = searchQuery.trim().toLowerCase();
+      body.replaceChildren();
+
+      // A search reaches across every library at once. Having to pick the
+      // right shelf before being allowed to look is the thing a search is for
+      // avoiding, and on stage it is the difference between finding a sound
+      // and giving up on it.
+      if (query) {
+        const hits = instance.sounds.filter(
+          (sound) =>
+            sound.name.toLowerCase().includes(query) ||
+            (sound.detail ?? "").toLowerCase().includes(query),
         );
+        count.textContent = `${hits.length} de ${total}`;
+        if (hits.length === 0) {
+          body.append(node("p", "empty-collection", "Ningún instrumento coincide."));
+          return;
+        }
+        const named = new Map(libraries.map((library) => [library.id, library.name]));
+        body.append(instrumentGrid(instance, hits, named));
         return;
       }
-      sounds.forEach((sound, index) => {
-        const button = node(
-          "button",
-          `program-row${sound.id === instance.selected_sound_id ? " selected" : ""}`,
-        );
-        const number = node(
-          "span",
-          "program-number",
-          String(index + 1).padStart(3, "0"),
-        );
-        const name = node("span", "program-name");
-        name.append(
-          node("strong", "", sound.name),
-          node("small", "", sound.detail ?? sound.bank ?? "DLS"),
-        );
-        const status = node(
-          "span",
-          "program-status",
-          sound.id === instance.selected_sound_id ? "PLAYING" : "LOAD",
-        );
-        button.append(number, name, status);
-        button.addEventListener("click", () =>
-          request("plugin.select_sound", { sound_id: sound.id }),
-        );
-        list.append(button);
-      });
+
+      const open = libraries.find((library) => library.id === openLibrary);
+      if (open) {
+        count.textContent = `${open.sounds.length} instrumento${open.sounds.length === 1 ? "" : "s"}`;
+        const back = node("button", "crumb");
+        back.type = "button";
+        back.append(node("span", "crumb-arrow", "←"), node("strong", "", open.name));
+        back.addEventListener("click", () => {
+          openLibrary = null;
+          draw();
+        });
+        body.append(back, instrumentGrid(instance, open.sounds, new Map()));
+        return;
+      }
+
+      count.textContent = `${libraries.length} librerías · ${total} instrumentos`;
+      const grid = node("div", "library-grid");
+      libraries.forEach((library) => grid.append(libraryCard(instance, library)));
+      body.append(grid);
     }
 
-    search.addEventListener("input", drawList);
-    drawList();
+    search.addEventListener("input", draw);
+    draw();
   }
+
+  /// The card naming what is loaded and ready to play.
+  function currentCard(instance, current, libraries) {
+    const card = node("section", "current-program");
+    const copy = node("div");
+    const library = libraries.find((entry) => entry.id === current?.bank);
+    copy.append(
+      node("span", "eyebrow", library ? library.name : "SIN INSTRUMENTO"),
+      node("h2", "", current?.name ?? "Ningún instrumento cargado"),
+      node("p", "", current?.detail ?? ""),
+    );
+    card.append(copy, node("span", "pulse", "MIDI READY"));
+    return card;
+  }
+
+  /// One library, shown as the instruments it holds.
+  function libraryCard(instance, library) {
+    const card = node("button", "library-card");
+    card.type = "button";
+    // The library's cover is its widest instrument, which is the one that
+    // best describes what the folder is for.
+    const widest = library.sounds.reduce((best, sound) => {
+      const facts = factsOf(sound);
+      const reach = facts.roots ? facts.roots[1] - facts.roots[0] : -1;
+      return reach > best.reach ? { sound, reach } : best;
+    }, { sound: library.sounds[0], reach: -1 });
+    const holds = library.sounds.some((sound) => factsOf(sound).roots);
+    if (holds) {
+      card.append(coverArt(factsOf(widest.sound)));
+    } else {
+      card.append(node("div", "cover cover-empty"));
+    }
+    const meta = node("div", "card-meta");
+    const bytes = library.sounds.reduce(
+      (sum, sound) => sum + (factsOf(sound).bytes ?? 0),
+      0,
+    );
+    meta.append(
+      node("strong", "", library.name),
+      node(
+        "small",
+        "",
+        `${library.sounds.length} instrumento${library.sounds.length === 1 ? "" : "s"}${bytes ? ` · ${memoryText(bytes)}` : ""}`,
+      ),
+    );
+    card.append(meta);
+    if (library.sounds.some((sound) => sound.id === instance.selected_sound_id)) {
+      card.classList.add("holds-selected");
+    }
+    card.addEventListener("click", () => {
+      openLibrary = library.id;
+      renderPlay(instance);
+    });
+    return card;
+  }
+
+  /// The instruments of one library, or the hits of a search.
+  function instrumentGrid(instance, sounds, libraryNames) {
+    const grid = node("div", "instrument-grid");
+    sounds.forEach((sound) => {
+      const facts = factsOf(sound);
+      const card = node(
+        "button",
+        `instrument-card${sound.id === instance.selected_sound_id ? " selected" : ""}`,
+      );
+      card.type = "button";
+      if (facts.roots) {
+        card.append(coverArt(facts));
+      } else {
+        card.append(node("div", "cover cover-empty"));
+      }
+      const meta = node("div", "card-meta");
+      const origin = libraryNames.get(sound.bank ?? "");
+      meta.append(node("strong", "", sound.name));
+      if (origin) {
+        meta.append(node("small", "origin", origin));
+      }
+      if (facts.roots) {
+        const range = `${noteName(facts.roots[0])}–${noteName(facts.roots[1])}`;
+        const parts = [range, `${facts.zones ?? 0} zonas`];
+        if ((facts.layers ?? 1) > 1) {
+          parts.push(`${facts.layers} capas`);
+        }
+        meta.append(node("small", "", parts.join(" · ")));
+      } else if (sound.detail) {
+        meta.append(node("small", "", sound.detail));
+      }
+      card.append(meta);
+      card.append(
+        node(
+          "span",
+          "instrument-status",
+          sound.id === instance.selected_sound_id ? "SONANDO" : "CARGAR",
+        ),
+      );
+      card.addEventListener("click", () =>
+        request("plugin.select_sound", { sound_id: sound.id }),
+      );
+      grid.append(card);
+    });
+    return grid;
+  }
+
 
   function renderConfigLibrary(instance) {
     root.replaceChildren();
