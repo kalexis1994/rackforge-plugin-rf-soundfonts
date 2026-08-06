@@ -22,6 +22,8 @@ pub const PROGRAM: i64 = 0x28;
 const GROUP_LIST: i64 = 0x33;
 /// The list of zones, whose entries carry a reference rather than a type.
 const ZONE_LIST: i64 = 0x34;
+/// The slots of a multi, each holding an instrument.
+pub const SLOT_LIST: i64 = 0x37;
 /// Up to eight loops belonging to a zone.
 pub const LOOP_ARRAY: i64 = 0x39;
 /// The list of sample file names.
@@ -70,6 +72,25 @@ impl PresetChunk {
         let mut chunks = Vec::new();
         read_run(&mut reader, 0, &mut chunks)?;
         Ok(chunks)
+    }
+
+    /// Reads one chunk whose type and body are already known.
+    ///
+    /// Some chunks are opaque to the tree and hold another chunk inside their
+    /// bytes, which only the reader that understands them can say.
+    pub fn parse_one(id: u16, body: &[u8]) -> Result<Self, SoundfontError> {
+        Self::from_body(i64::from(id), body, 0)
+    }
+
+    /// Reads a bare array: a count and then that many structures.
+    ///
+    /// The entries carry no type, so whoever asked for them decides what they
+    /// are. A program list is the case that matters.
+    pub fn parse_array(data: &[u8]) -> Result<Vec<Self>, SoundfontError> {
+        let mut holder = Self::default();
+        let mut reader = Reader::new(data);
+        holder.read_array(&mut reader, data.len(), false, 0)?;
+        Ok(holder.children)
     }
 
     /// Collects every chunk of one type, at any depth.

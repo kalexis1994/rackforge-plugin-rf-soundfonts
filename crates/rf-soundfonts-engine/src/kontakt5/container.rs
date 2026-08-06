@@ -490,29 +490,44 @@ mod real_files {
                     eprintln!("    preset volcado en {dump}");
                 }
                 let chunks = crate::kontakt5::chunk::PresetChunk::parse_all(data).unwrap();
-                let mut programs = Vec::new();
-                crate::kontakt5::chunk::PresetChunk::find_all(
-                    &chunks,
-                    crate::kontakt5::chunk::PROGRAM,
-                    &mut programs,
-                );
-                let mut names = Vec::new();
-                for id in [
-                    crate::kontakt5::chunk::FILENAME_LIST,
-                    crate::kontakt5::chunk::FILENAME_LIST_EX,
-                ] {
-                    crate::kontakt5::chunk::PresetChunk::find_all(&chunks, id, &mut names);
-                }
+                let programs = match crate::kontakt5::program::Program::read_all(&chunks) {
+                    Ok(programs) => programs,
+                    Err(error) => {
+                        eprintln!("    programas: {error}");
+                        Vec::new()
+                    }
+                };
+                let paths = match crate::kontakt5::program::file_paths(&chunks) {
+                    Ok(paths) => paths,
+                    Err(error) => {
+                        eprintln!("    rutas: {error}");
+                        Vec::new()
+                    }
+                };
                 eprintln!(
-                    "    preset: {} chunks de nivel superior, {} programas, {} listas de nombres",
+                    "    preset: {} chunks, {} programas, {} rutas",
                     chunks.len(),
                     programs.len(),
-                    names.len(),
+                    paths.len(),
                 );
+                for path in paths.iter().take(3) {
+                    eprintln!("      ruta: {path}");
+                }
                 for program in &programs {
-                    let groups = program.child(0x33).map_or(0, |list| list.children.len());
-                    let zones = program.child(0x34).map_or(0, |list| list.children.len());
-                    eprintln!("      programa: {groups} grupos, {zones} zonas");
+                    let placed = program.zones.iter().filter(|z| z.file.is_some()).count();
+                    let looped: usize = program.zones.iter().map(|z| z.loops.len()).sum();
+                    eprintln!(
+                        "      {:22} {:4} zonas ({placed} con sample, {looped} loops)",
+                        program.name,
+                        program.zones.len(),
+                    );
+                    for zone in program.zones.iter().take(2) {
+                        eprintln!(
+                            "         teclas {}..{} vel {}..{} raiz {} archivo {:?} {}Hz {}ch",
+                            zone.key_low, zone.key_high, zone.velocity_low, zone.velocity_high,
+                            zone.root_key, zone.file, zone.sample_rate, zone.channels,
+                        );
+                    }
                 }
                 seen += 1;
             }
