@@ -27,6 +27,13 @@ use crate::{DlsError, sample};
 /// Frames of every sample kept resident, following LinuxSampler's default.
 pub const PRELOAD_FRAMES: usize = 32_768;
 
+/// Largest looped sample held whole rather than streamed.
+///
+/// A loop needs the audio in memory because playback moves backwards through
+/// it. This bounds what that can cost: a sample beyond the limit is streamed
+/// without its loop, which shortens the note but cannot exhaust the machine.
+pub const MAX_LOOPED_RESIDENT_BYTES: usize = 32 * 1_048_576;
+
 /// One sample: a resident head and a path to the rest.
 #[derive(Clone, Debug)]
 pub struct StreamedSample {
@@ -171,7 +178,19 @@ impl SampleStore {
         })?;
         let header = pcm_cache::read_header(&mut file).unwrap_or(header);
         let channels = usize::from(header.channels).max(1);
-        let preload_frames = PRELOAD_FRAMES.min(header.frame_count);
+        // A looped sample is held whole. The loop of a converted library sits
+        // at the very end — the Rhodes measured here loops the last 69 ms of a
+        // seven-second recording — so playback jumps backwards there, and the
+        // streaming window only moves forward. Holding the sample costs memory
+        // that looped libraries do not have much of: they loop precisely
+        // because they are built from short recordings.
+        let resident_whole = header.sample_loop.is_some()
+            && header.frame_count * channels * size_of::<f32>() <= MAX_LOOPED_RESIDENT_BYTES;
+        let preload_frames = if resident_whole {
+            header.frame_count
+        } else {
+            PRELOAD_FRAMES.min(header.frame_count)
+        };
         let mut preload = vec![0.0_f32; preload_frames * channels];
         let mut scratch = Vec::new();
         pcm_cache::read_frames(&file, &header, 0, &mut preload, &mut scratch)?;

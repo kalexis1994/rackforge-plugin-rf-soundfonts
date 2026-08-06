@@ -27,10 +27,10 @@ const MAGIC: &[u8; 8] = b"RFDLSPCM";
 
 /// Bump whenever the layout changes; a stale cache is then rebuilt, not
 /// misread.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Bytes before the first frame.
-const HEADER_BYTES: u64 = 32;
+const HEADER_BYTES: u64 = 48;
 
 /// How samples are stored in the cache body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +68,9 @@ impl CacheFormat {
 /// What a reader needs to know about a cached sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheHeader {
+    /// Loop the source declared, in frames. Carried through the cache so a
+    /// converted library keeps the markers its SFZ never states explicitly.
+    pub sample_loop: Option<crate::SampleLoop>,
     pub sample_rate: u32,
     pub channels: u8,
     pub format: CacheFormat,
@@ -96,6 +99,7 @@ pub fn write(path: &Path, wave: &Wave, format: CacheFormat) -> Result<CacheHeade
         channels: wave.channels,
         format,
         frame_count: wave.frame_count(),
+        sample_loop: wave.sample_params.and_then(|params| params.sample_loop),
     };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| DlsError::Read {
@@ -117,6 +121,12 @@ pub fn write(path: &Path, wave: &Wave, format: CacheFormat) -> Result<CacheHeade
         prologue.extend_from_slice(&u32::from(header.channels).to_le_bytes());
         prologue.extend_from_slice(&format.tag().to_le_bytes());
         prologue.extend_from_slice(&(header.frame_count as u64).to_le_bytes());
+        // A loop of 0..0 means none, which no real loop can be.
+        let (loop_start, loop_end) = header
+            .sample_loop
+            .map_or((0_u64, 0_u64), |looping| (looping.start as u64, looping.end as u64));
+        prologue.extend_from_slice(&loop_start.to_le_bytes());
+        prologue.extend_from_slice(&loop_end.to_le_bytes());
         prologue.resize(HEADER_BYTES as usize, 0);
         file.write_all(&prologue).map_err(read_error)?;
 
@@ -177,11 +187,18 @@ pub fn read_header(file: &mut File) -> Result<CacheHeader, DlsError> {
     let format = CacheFormat::from_tag(word(20))
         .ok_or_else(|| DlsError::Invalid("PCM cache has an unknown sample format".into()))?;
     let frame_count = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+    let loop_start = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let loop_end = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+    let sample_loop = (loop_start < loop_end).then_some(crate::SampleLoop {
+        start: loop_start,
+        end: loop_end,
+    });
     Ok(CacheHeader {
         sample_rate: word(12),
         channels: channels as u8,
         format,
         frame_count: usize::try_from(frame_count).unwrap_or(0),
+        sample_loop,
     })
 }
 

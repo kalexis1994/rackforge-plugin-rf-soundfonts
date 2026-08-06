@@ -123,45 +123,10 @@ fn decode_samples(
 /// led into deep recursion by a malformed file.
 fn read_smpl_loop(bytes: &[u8]) -> Option<SampleLoop> {
     const HEADER: usize = 12;
-    const SMPL_LOOP_COUNT_OFFSET: usize = 28;
-    const SMPL_LOOPS_OFFSET: usize = 36;
-    const LOOP_RECORD: usize = 24;
-
     if bytes.len() < HEADER || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }
-    let mut cursor = HEADER;
-    while cursor + 8 <= bytes.len() {
-        let id = &bytes[cursor..cursor + 4];
-        let size = u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().ok()?) as usize;
-        let body = cursor + 8;
-        let end = body.checked_add(size)?;
-        if end > bytes.len() {
-            return None;
-        }
-        if id == b"smpl" && size >= SMPL_LOOPS_OFFSET + LOOP_RECORD {
-            let chunk = &bytes[body..end];
-            let count = u32::from_le_bytes(
-                chunk[SMPL_LOOP_COUNT_OFFSET..SMPL_LOOP_COUNT_OFFSET + 4]
-                    .try_into()
-                    .ok()?,
-            );
-            if count == 0 {
-                return None;
-            }
-            let record = &chunk[SMPL_LOOPS_OFFSET..SMPL_LOOPS_OFFSET + LOOP_RECORD];
-            let start = u32::from_le_bytes(record[8..12].try_into().ok()?) as usize;
-            let last = u32::from_le_bytes(record[12..16].try_into().ok()?) as usize;
-            // `smpl` stores the last frame *inside* the loop; the engine's end
-            // is exclusive. Off by one here detunes every sustained note.
-            return Some(SampleLoop {
-                start,
-                end: last.checked_add(1)?,
-            });
-        }
-        cursor = end + (size & 1);
-    }
-    None
+    crate::smpl::loop_in_riff(bytes, HEADER)
 }
 
 #[cfg(test)]

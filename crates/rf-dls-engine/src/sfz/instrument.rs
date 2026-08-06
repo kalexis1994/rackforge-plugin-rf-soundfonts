@@ -117,7 +117,30 @@ pub struct SfzInstrument {
     pub curves: BTreeMap<u32, Curve>,
     /// Controller values the document declares through `set_cc`/`set_hdcc`.
     pub defaults: CcState,
+    /// Gain that brings this instrument to the shared reference level.
+    ///
+    /// Libraries are mastered independently and arrive far apart: a piano and
+    /// a Rhodes measured here peaked 10.4 dB apart, which means the master
+    /// fader has to be moved on every sound change. That is not a thing a
+    /// player can do between two songs, so the instruments are levelled to
+    /// each other when they load.
+    pub normalisation: f32,
 }
+
+/// Peak a single note is levelled to.
+///
+/// Deliberately far below full scale. This is the loudest one note may reach,
+/// and notes are played together: a reference near unity would leave a chord
+/// nowhere to go. A quarter leaves roughly four notes of linear headroom, and
+/// real chords sum well below linearly because their partials do not align.
+const REFERENCE_PEAK: f32 = 0.25;
+
+/// Bounds on the correction, so a measurement cannot produce a surprise.
+///
+/// A library that is already close needs almost nothing; one that is silent
+/// through its own settings must not be amplified into noise.
+const MIN_NORMALISATION: f32 = 0.05;
+const MAX_NORMALISATION: f32 = 8.0;
 
 impl SfzInstrument {
     /// Reads and loads an instrument, decoding every sample it references.
@@ -174,13 +197,48 @@ impl SfzInstrument {
             };
             regions.push(region_from(opcodes, index, &samples[index]));
         }
-        Ok(Self {
+        let mut instrument = Self {
             name,
             samples,
             regions,
             curves: document.curves.clone(),
             defaults,
-        })
+            normalisation: 1.0,
+        };
+        instrument.normalisation = instrument.measure_normalisation();
+        Ok(instrument)
+    }
+
+    /// Derives the gain that brings this instrument to [`REFERENCE_PEAK`].
+    ///
+    /// Measured from the resident heads, which cost nothing to read because
+    /// they are already in memory and which contain the attack — where a
+    /// plucked or struck instrument reaches its peak. Each region's sample is
+    /// weighted by the gain that region would actually apply, so a library
+    /// that quietens a layer in its own settings is not treated as loud.
+    fn measure_normalisation(&self) -> f32 {
+        let curves = &self.curves;
+        let mut peak = 0.0_f32;
+        for region in &self.regions {
+            let Some(sample) = self.samples.get(region.wave_index) else {
+                continue;
+            };
+            let loudest = sample
+                .preload
+                .iter()
+                .fold(0.0_f32, |loudest, value| loudest.max(value.abs()));
+            if loudest <= 0.0 {
+                continue;
+            }
+            // Resolved at full velocity, because that is the loudest the
+            // region can be asked to play.
+            let config = region.resolve(&self.defaults, curves);
+            peak = peak.max(loudest * config.gain);
+        }
+        if peak <= 0.0 {
+            return 1.0;
+        }
+        (REFERENCE_PEAK / peak).clamp(MIN_NORMALISATION, MAX_NORMALISATION)
     }
 
     /// Bytes of memory the instrument holds resident.
@@ -220,7 +278,8 @@ impl SfzInstrument {
                 continue;
             }
             let sample = &self.samples[region.wave_index];
-            let config = region.resolve(cc, &self.curves);
+            let mut config = region.resolve(cc, &self.curves);
+            config.gain *= self.normalisation;
             let params = SampleParams {
                 unity_note: u16::from(region.pitch_keycenter),
                 fine_tune: region.tune_cents as i16,
@@ -405,10 +464,24 @@ fn loop_from(opcodes: &OpcodeMap, sample: &StreamedSample) -> Option<crate::Samp
             .get(name)
             .and_then(|value| value.parse::<usize>().ok())
     };
-    let start = frames("loop_start").or_else(|| frames("loopstart"))?;
-    let end = frames("loop_end").or_else(|| frames("loopend"))?;
-    // `loop_end` names the last frame inside the loop, as `smpl` does.
-    let end = end.checked_add(1)?;
+    let explicit = frames("loop_start")
+        .or_else(|| frames("loopstart"))
+        .zip(frames("loop_end").or_else(|| frames("loopend")))
+        // `loop_end` names the last frame inside the loop, as `smpl` does.
+        .and_then(|(start, last)| Some((start, last.checked_add(1)?)));
+
+    // A region that asks to loop and states no points expects the sample's
+    // own. That is how SoundFont conversions are written: `loop_mode` in the
+    // document, the markers in the file. Ignoring the fallback turns a
+    // sustaining instrument into one that stops when the recording ends.
+    let (start, end) = match explicit {
+        Some(points) => points,
+        None if mode.is_some() => {
+            let inherited = sample.header.sample_loop?;
+            (inherited.start, inherited.end)
+        }
+        None => return None,
+    };
     (start < end && end <= sample.frame_count).then_some(crate::SampleLoop { start, end })
 }
 
@@ -529,6 +602,7 @@ mod tests {
                 channels: 2,
                 format: crate::pcm_cache::CacheFormat::Int16,
                 frame_count: frames,
+                sample_loop: None,
             },
         }
     }

@@ -1,3 +1,4 @@
+pub mod smpl;
 pub mod streamer;
 pub mod spsc;
 pub mod sample_store;
@@ -11,6 +12,13 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
+
+/// Fade applied as a sample runs out, so its final frame is never a step.
+///
+/// Short enough to be inaudible as a fade and long enough to remove the
+/// discontinuity: five milliseconds is roughly two cycles of the lowest note
+/// a keyboard produces.
+const END_DECLICK_SECONDS: f32 = 0.005;
 
 const DLS_DRUM_BANK: u32 = 0x8000_0000;
 const CONN_SRC_NONE: u16 = 0x0000;
@@ -183,7 +191,7 @@ fn info_name(container: &Chunk, bytes: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SampleLoop {
     pub start: usize,
     pub end: usize,
@@ -1205,6 +1213,19 @@ impl Voice {
             return [0.0, 0.0];
         }
         let end = self.sample_loop.map_or(self.frame_count, |looping| looping.end);
+        // A sample that simply runs out must not cut mid-waveform. Material
+        // recorded to decay ends near silence and costs nothing here, but a
+        // looped library is cut at its loop point instead: 94 of the 130
+        // samples in the Rhodes measured here end above 0.01, the worst at
+        // half of full scale. Dropping that to zero in one frame is a click,
+        // and it is heard whether or not the loop is ever honoured.
+        if self.sample_loop.is_none() && self.fade_step == 0.0 {
+            let remaining = (end as f64 - self.position).max(0.0);
+            let frames_left = remaining / self.base_increment.max(f64::MIN_POSITIVE);
+            if frames_left <= f64::from(END_DECLICK_SECONDS * self.output_rate) {
+                self.fade_out(END_DECLICK_SECONDS);
+            }
+        }
         if self.position >= end as f64 {
             if let Some(looping) = self.sample_loop {
                 let length = (looping.end - looping.start) as f64;
@@ -1827,6 +1848,42 @@ mod tests {
         assert!(frames < 1_000, "the slower request won: {frames} frames");
     }
 
+    #[test]
+    fn a_sample_that_ends_loud_still_stops_quietly() {
+        // A looped library is cut at its loop point rather than faded, so its
+        // last frame can sit at half of full scale. Reaching the end of one
+        // must not produce a step.
+        let bank = stereo_fixture(1, vec![0.5; 2_000], None);
+        let mut voice = fixture_voice(&bank, 0.0);
+        let mut previous = 0.0;
+        let mut worst_step = 0.0_f32;
+        let mut frames = 0;
+        while !voice.is_finished() && frames < 10_000 {
+            let value = voice.next_frame()[0];
+            if frames > 0 {
+                worst_step = worst_step.max((value - previous).abs());
+            }
+            previous = value;
+            frames += 1;
+        }
+        assert!(voice.is_finished(), "the voice never ended");
+        assert!(previous.abs() < 0.01, "it stopped at {previous}, which is a click");
+        assert!(worst_step < 0.05, "a step of {worst_step} remains at the end");
+    }
+
+    #[test]
+    fn a_looping_sample_is_not_faded_at_its_loop_point() {
+        // The declick must not mistake a loop for the end of the audio.
+        let bank = stereo_fixture(1, vec![0.5; 2_000], Some(SampleLoop { start: 0, end: 1_000 }));
+        let mut voice = fixture_voice(&bank, 0.0);
+        for _ in 0..4_000 {
+            voice.next_frame();
+        }
+        assert!(!voice.is_finished(), "a looping voice ended");
+        assert!(!voice.is_fading(), "a looping voice was faded out");
+    }
+
+    #[test]
     #[test]
     fn a_voice_nobody_faded_keeps_its_full_level() {
         let bank = stereo_fixture(1, vec![0.5; 100], None);

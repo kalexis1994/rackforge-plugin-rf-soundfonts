@@ -76,14 +76,66 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, DlsError> {
         )));
     }
 
+    let frames = samples.len() / info.channels as usize;
+    let sample_loop = read_loop(bytes).filter(|looping| {
+        looping.start < looping.end && looping.end <= frames
+    });
+
     Ok(Wave {
         name,
         sample_rate: info.sample_rate,
         channels: info.channels as u8,
         source_bits: info.bits_per_sample as u16,
         samples: Arc::from(samples),
-        sample_params: None,
+        sample_params: sample_loop.map(|sample_loop| crate::SampleParams {
+            // The instrument decides the root note; the file contributes only
+            // its loop.
+            unity_note: 60,
+            fine_tune: 0,
+            attenuation_db: 0.0,
+            sample_loop: Some(sample_loop),
+        }),
     })
+}
+
+/// Finds loop markers a converter preserved from the original WAV.
+///
+/// FLAC has nowhere of its own to keep them, so a converted library carries
+/// the source RIFF chunks verbatim inside `APPLICATION` blocks tagged `riff`.
+/// A library that declares `loop_mode` and no explicit points — which is how
+/// SoundFont conversions are written — depends entirely on these.
+fn read_loop(bytes: &[u8]) -> Option<crate::SampleLoop> {
+    const STREAM_MARKER: usize = 4;
+    const APPLICATION: u8 = 2;
+
+    if bytes.len() < STREAM_MARKER || &bytes[0..4] != b"fLaC" {
+        return None;
+    }
+    let mut cursor = STREAM_MARKER;
+    while cursor + 4 <= bytes.len() {
+        let header = bytes[cursor];
+        let last = header & 0x80 != 0;
+        let kind = header & 0x7f;
+        let length = u32::from_be_bytes([0, bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]])
+            as usize;
+        let body = cursor + 4;
+        let end = body.checked_add(length)?;
+        if end > bytes.len() {
+            return None;
+        }
+        if kind == APPLICATION
+            && length > 4
+            && &bytes[body..body + 4] == b"riff"
+            && let Some(looping) = crate::smpl::loop_in_riff(&bytes[body + 4..end], 0)
+        {
+            return Some(looping);
+        }
+        cursor = end;
+        if last {
+            break;
+        }
+    }
+    None
 }
 
 #[cfg(test)]
