@@ -16,7 +16,7 @@
 //! controllers hold at that instant. That is the difference between this and
 //! the DLS path, where a region's level was decided when the bank was parsed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::sfz::parse::{Curve, OpcodeMap, SfzDocument};
@@ -106,6 +106,38 @@ pub struct SampledRegion {
     pub pan_cc: Vec<CcModulation>,
     pub veltrack_cc: Vec<CcModulation>,
     pub release_cc: Vec<CcModulation>,
+}
+
+/// What an instrument is, as a surface would describe it to a player.
+///
+/// Enough to draw a cover and to tell two instruments apart at a glance, and
+/// nothing that would go stale: every number here is counted from the loaded
+/// instrument each time it is asked for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InstrumentSummary {
+    /// Lowest and highest key any region answers to.
+    ///
+    /// Usually the whole keyboard, and usually not worth showing on its own.
+    /// A converted library stretches its outermost regions to `0` and `127` so
+    /// that no key is silent, which makes ten different trumpets all claim the
+    /// same range.
+    pub key_low: u8,
+    pub key_high: u8,
+    /// Lowest and highest key that was actually recorded.
+    ///
+    /// Taken from where the regions are centred rather than from how far they
+    /// reach, so this says what the instrument really covers: the notes played
+    /// into a microphone, before anyone stretched them outwards to fill the
+    /// keyboard. This is the range worth showing a player.
+    pub root_low: u8,
+    pub root_high: u8,
+    pub regions: usize,
+    /// Distinct audio files, which is fewer than the regions whenever an
+    /// instrument reuses one recording across several keys.
+    pub samples: usize,
+    pub velocity_layers: usize,
+    pub resident_bytes: usize,
+    pub looping: bool,
 }
 
 /// A loaded SFZ instrument.
@@ -264,6 +296,48 @@ impl SampledInstrument {
     /// Bytes of memory the instrument holds resident.
     pub fn resident_bytes(&self) -> usize {
         self.samples.iter().map(StreamedSample::resident_bytes).sum()
+    }
+
+    /// What this instrument is, in the few numbers worth showing a player.
+    ///
+    /// Read from the parsed regions rather than from the document, because the
+    /// document cannot answer for every library: one states its regions across
+    /// `#include` files, another spells the same idea `key` where its
+    /// neighbour spells it `lokey`, and a Kontakt map has no text at all. By
+    /// the time an instrument exists here every one of those has been resolved
+    /// into the same shape, so this counts what will actually sound.
+    pub fn summary(&self) -> InstrumentSummary {
+        let mut velocity_bands: BTreeSet<(u8, u8)> = BTreeSet::new();
+        let mut key_low = u8::MAX;
+        let mut key_high = u8::MIN;
+        let mut root_low = u8::MAX;
+        let mut root_high = u8::MIN;
+        for region in &self.regions {
+            key_low = key_low.min(region.key_low);
+            key_high = key_high.max(region.key_high);
+            root_low = root_low.min(region.pitch_keycenter);
+            root_high = root_high.max(region.pitch_keycenter);
+            velocity_bands.insert((region.velocity_low, region.velocity_high));
+        }
+        InstrumentSummary {
+            // An instrument with no regions cannot sound, but it can still be
+            // listed, and an inverted range would be read as a mistake.
+            key_low: key_low.min(key_high),
+            key_high,
+            root_low: root_low.min(root_high),
+            root_high,
+            regions: self.regions.len(),
+            samples: self.samples.len(),
+            // Distinct velocity spans, which is what a player means by layers.
+            // One span covering the whole range is not a layer, it is the
+            // absence of layering, and counting it as one says so.
+            velocity_layers: velocity_bands.len(),
+            resident_bytes: self.resident_bytes(),
+            looping: self
+                .regions
+                .iter()
+                .any(|region| region.sample_loop.is_some()),
+        }
     }
 
     /// Seconds a displaced voice should take to fade.

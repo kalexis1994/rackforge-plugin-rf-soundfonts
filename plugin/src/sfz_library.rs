@@ -430,3 +430,48 @@ mod tests {
         assert!(failures[0].contains("broken.sfz"), "{:?}", failures);
     }
 }
+
+#[cfg(test)]
+mod real_library {
+    use super::*;
+
+    /// Reports what every installed instrument says about itself.
+    ///
+    /// ```text
+    /// RF_SOUNDFONTS_ROOT=/path/to/sfz cargo test -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires an installed library root"]
+    fn describes_every_installed_instrument() {
+        let root = std::env::var("RF_SOUNDFONTS_ROOT")
+            .expect("set RF_SOUNDFONTS_ROOT to the installed sfz directory");
+        let (library, failures) = SfzLibrary::load(std::path::Path::new(&root));
+        for failure in &failures {
+            eprintln!("  aviso: {failure}");
+        }
+        let mut current = String::new();
+        for loaded in library.instruments() {
+            if loaded.library != current {
+                current = loaded.library.clone();
+                eprintln!("{current}");
+            }
+            let summary = loaded.instrument.summary();
+            eprintln!(
+                "   {:26} grabado {:>3}-{:<3} alcanza {:>3}-{:<3} {:>4} zonas {:>4} samples {:>2} capas {:>4} MiB{}",
+                loaded.name,
+                summary.root_low,
+                summary.root_high,
+                summary.key_low,
+                summary.key_high,
+                summary.regions,
+                summary.samples,
+                summary.velocity_layers,
+                summary.resident_bytes / 1_048_576,
+                if summary.looping { " loop" } else { "" },
+            );
+            assert!(summary.key_low <= summary.key_high, "{}", loaded.name);
+            assert!(summary.regions > 0, "{} has no regions", loaded.name);
+        }
+        assert!(!library.is_empty());
+    }
+}

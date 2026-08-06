@@ -773,17 +773,15 @@ fn dynamic_catalog(
             });
         }
         for (offset, loaded) in library.instruments().iter().enumerate() {
+            let summary = loaded.instrument.summary();
             presets.push(PresetDescriptor {
                 id: sfz_library::preset_id(&loaded.id),
                 name: loaded.name.clone(),
-                description: Some(format!(
-                    "{} MiB",
-                    loaded.instrument.resident_bytes() / 1_048_576
-                )),
+                description: Some(describe(&summary)),
                 bank: Some(sfz_bank_id(&loaded.library)),
                 category: Some("Instrument".into()),
                 order: offset as i32,
-                tags: vec!["sfz".into()],
+                tags: facts(&summary),
                 editable: false,
             });
         }
@@ -793,6 +791,72 @@ fn dynamic_catalog(
         schema_version: 1,
         banks,
         presets,
+    }
+}
+
+#[cfg(test)]
+mod fact_tests {
+    use super::{describe, facts, note_name};
+    use rf_soundfonts::sfz::instrument::InstrumentSummary;
+
+    fn summary() -> InstrumentSummary {
+        InstrumentSummary {
+            key_low: 0,
+            key_high: 127,
+            root_low: 21,
+            root_high: 108,
+            regions: 807,
+            samples: 599,
+            velocity_layers: 4,
+            resident_bytes: 67 * 1_048_576,
+            looping: true,
+        }
+    }
+
+    #[test]
+    fn middle_c_is_c4() {
+        // The one convention worth pinning: MIDI 60 has been called C3, C4 and
+        // C5 by different makers, and a keyboard player reads the label off
+        // their own instrument.
+        assert_eq!(note_name(60), "C4");
+        assert_eq!(note_name(21), "A0");
+        assert_eq!(note_name(108), "C8");
+        assert_eq!(note_name(0), "C-1");
+    }
+
+    #[test]
+    fn a_description_names_the_recorded_range_not_the_reachable_one() {
+        // Ten trumpets all answer to the whole keyboard because their
+        // outermost regions were stretched to cover it. What tells them apart
+        // is where they were actually played.
+        assert_eq!(describe(&summary()), "A0–C8 · 807 zones · 4 layers · 67 MiB");
+    }
+
+    #[test]
+    fn an_unlayered_instrument_does_not_claim_one_layer() {
+        // One velocity span covering everything is the absence of layering,
+        // and saying "1 layer" invites the reader to think it means something.
+        let mut plain = summary();
+        plain.velocity_layers = 1;
+        assert!(!describe(&plain).contains("layer"), "{}", describe(&plain));
+    }
+
+    #[test]
+    fn the_marks_carry_what_a_cover_needs_to_be_drawn() {
+        let marks = facts(&summary());
+        assert!(marks.contains(&"keys:0-127".to_string()), "{marks:?}");
+        assert!(marks.contains(&"roots:21-108".to_string()), "{marks:?}");
+        assert!(marks.contains(&"zones:807".to_string()), "{marks:?}");
+        assert!(marks.contains(&"layers:4".to_string()), "{marks:?}");
+        assert!(marks.contains(&"samples:599".to_string()), "{marks:?}");
+        assert!(marks.contains(&"looping".to_string()), "{marks:?}");
+    }
+
+    #[test]
+    fn an_instrument_that_never_loops_is_not_marked_as_looping() {
+        let mut once = summary();
+        once.looping = false;
+        assert!(!facts(&once).contains(&"looping".to_string()));
     }
 }
 
@@ -823,6 +887,67 @@ mod bank_id_tests {
     fn a_nameless_folder_still_yields_an_identifier() {
         assert_eq!(sfz_bank_id("!!!"), "library");
     }
+}
+
+/// One line about an instrument, for a surface with room for one line.
+fn describe(summary: &rf_soundfonts::sfz::instrument::InstrumentSummary) -> String {
+    // The recorded range, not the range it answers to: the second is nearly
+    // always the whole keyboard and tells a player nothing.
+    let mut text = format!(
+        "{}–{} · {} zones",
+        note_name(summary.root_low),
+        note_name(summary.root_high),
+        summary.regions
+    );
+    if summary.velocity_layers > 1 {
+        text.push_str(&format!(" · {} layers", summary.velocity_layers));
+    }
+    text.push_str(&format!(" · {}", memory(summary.resident_bytes)));
+    text
+}
+
+/// The same facts as marks, for a surface that wants to draw rather than read.
+///
+/// Written as `name:value` because a tag is a bare string and the host does
+/// not interpret it. Only this plugin and its own web surface read these, so
+/// the shape is theirs to agree on; nothing else should depend on it.
+fn facts(summary: &rf_soundfonts::sfz::instrument::InstrumentSummary) -> Vec<String> {
+    let mut tags = vec![
+        "sfz".to_string(),
+        format!("keys:{}-{}", summary.key_low, summary.key_high),
+        format!("roots:{}-{}", summary.root_low, summary.root_high),
+        format!("zones:{}", summary.regions),
+        format!("samples:{}", summary.samples),
+        format!("layers:{}", summary.velocity_layers),
+        format!("bytes:{}", summary.resident_bytes),
+    ];
+    if summary.looping {
+        tags.push("looping".to_string());
+    }
+    tags
+}
+
+/// Resident memory, in the largest unit that still reads as a number.
+///
+/// A tenth of a megabyte shown as `0 MiB` looks like nothing loaded at all.
+fn memory(bytes: usize) -> String {
+    if bytes >= 1_048_576 {
+        format!("{} MiB", bytes / 1_048_576)
+    } else {
+        format!("{} KiB", bytes / 1_024)
+    }
+}
+
+/// A MIDI note as a player would name it, with middle C as C4.
+fn note_name(note: u8) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    format!(
+        "{}{}",
+        NAMES[usize::from(note) % 12],
+        i16::from(note) / 12 - 1
+    )
 }
 
 /// Bank identifier for a library, derived from its folder name.
