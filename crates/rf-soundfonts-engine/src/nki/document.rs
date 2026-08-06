@@ -48,6 +48,25 @@ const KONTAKT_2: &[u8; 4] = b"2noK";
 /// instrument's size.
 const MAX_DOCUMENT_BYTES: usize = 64 * 1_048_576;
 
+/// The amplitude envelope a group applies to its zones.
+///
+/// Kontakt keeps this in a modulator rather than in the zone: a group holds a
+/// list of them, each naming what it drives, and the one driving `volume` is
+/// the note's shape. The others — a filter sweep, a pitch wobble — are read
+/// past, because the renderer has nothing to do with them.
+///
+/// Times are seconds, converted from the milliseconds the document states.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NkiEnvelope {
+    pub attack_seconds: f32,
+    /// Kept for fidelity to the document. Every library examined states zero,
+    /// and the renderer's envelope has no hold stage to put it in.
+    pub hold_seconds: f32,
+    pub decay_seconds: f32,
+    pub sustain_level: f32,
+    pub release_seconds: f32,
+}
+
 /// One sample placed on the keyboard.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NkiZone {
@@ -60,6 +79,8 @@ pub struct NkiZone {
     pub velocity_high: u8,
     /// Frame the sample starts from, for a trimmed attack.
     pub sample_start: usize,
+    /// Group whose envelope shapes this zone, by position in the document.
+    pub group: usize,
     /// Linear volume, where 1.0 is unity.
     pub volume: f32,
     /// Stereo position from -1.0 to 1.0.
@@ -74,6 +95,10 @@ pub struct NkiZone {
 pub struct NkiDocument {
     pub name: String,
     pub zones: Vec<NkiZone>,
+    /// Envelope of each group, in document order. A group that declares no
+    /// modulator driving volume holds `None`, and its zones take the
+    /// renderer's default rather than a shape invented here.
+    pub groups: Vec<Option<NkiEnvelope>>,
 }
 
 /// Inflates the document inside a `.nki`.
@@ -142,17 +167,82 @@ pub fn parse(text: &str) -> Result<(NkiDocument, usize), SoundfontError> {
     let mut depth_of_zone = 0_usize;
     let mut depth = 0_usize;
 
+    // A group's envelope arrives in pieces spread across three nested
+    // elements: which parameter the modulator drives, and separately the
+    // stage times. They are collected as they pass and joined when the
+    // modulator closes.
+    let mut group_envelope: Option<NkiEnvelope> = None;
+    let mut in_group = false;
+    let mut in_modulator = false;
+    let mut modulator_kind: Option<String> = None;
+    let mut modulator_target: Option<String> = None;
+    let mut in_envelope = false;
+    let mut stages: BTreeMap<String, String> = BTreeMap::new();
+
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
                 depth += 1;
-                if element.name().as_ref() == b"K2_Zone" {
-                    current = Some(BTreeMap::new());
-                    depth_of_zone = depth;
+                match element.name().as_ref() {
+                    b"K2_Zone" => {
+                        let mut values = BTreeMap::new();
+                        // The group reference is an attribute of the zone
+                        // rather than one of its listed values, so it is put
+                        // in with them here and read back like the rest.
+                        #[allow(deprecated)]
+                        for attribute in element.attributes().flatten() {
+                            if attribute.key.as_ref() == b"groupIdx"
+                                && let Ok(text) = attribute.unescape_value()
+                            {
+                                values.insert("groupIdx".to_string(), text.into_owned());
+                            }
+                        }
+                        current = Some(values);
+                        depth_of_zone = depth;
+                    }
+                    b"K2_Group" => {
+                        in_group = true;
+                        group_envelope = None;
+                    }
+                    b"K2_IntMod" => {
+                        in_modulator = true;
+                        modulator_kind = None;
+                        modulator_target = None;
+                        stages.clear();
+                    }
+                    b"Envelope" => {
+                        in_envelope = true;
+                        // What kind of modulator this is sits on the envelope,
+                        // not on the modulator: `K2_IntMod` carries only an
+                        // index and a version. A pitch wobble has no
+                        // `<Envelope>` at all, so its absence is the answer.
+                        #[allow(deprecated)]
+                        for attribute in element.attributes().flatten() {
+                            if attribute.key.as_ref() == b"type"
+                                && let Ok(text) = attribute.unescape_value()
+                            {
+                                modulator_kind = Some(text.into_owned());
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             Ok(Event::Empty(element)) => {
                 if element.name().as_ref() != b"V" {
+                    continue;
+                }
+                if in_envelope || in_modulator {
+                    let (Some(name), Some(value)) = value_pair(&element) else {
+                        continue;
+                    };
+                    if in_envelope {
+                        stages.entry(name).or_insert(value);
+                    } else if name == "target" {
+                        // The first target wins: a modulator may drive several
+                        // parameters, and the volume one names it first.
+                        modulator_target.get_or_insert(value);
+                    }
                     continue;
                 }
                 let Some(values) = current.as_mut() else {
@@ -185,13 +275,37 @@ pub fn parse(text: &str) -> Result<(NkiDocument, usize), SoundfontError> {
                 }
             }
             Ok(Event::End(element)) => {
-                if element.name().as_ref() == b"K2_Zone" && depth == depth_of_zone
-                    && let Some(values) = current.take() {
-                        match zone_from(&values) {
-                            Some(zone) => document.zones.push(zone),
-                            None => skipped += 1,
+                match element.name().as_ref() {
+                    b"K2_Zone" if depth == depth_of_zone => {
+                        if let Some(values) = current.take() {
+                            match zone_from(&values) {
+                                Some(zone) => document.zones.push(zone),
+                                None => skipped += 1,
+                            }
                         }
                     }
+                    b"Envelope" => in_envelope = false,
+                    b"K2_IntMod" => {
+                        let drives_volume = modulator_kind.as_deref() == Some("ahdsr")
+                            && modulator_target.as_deref() == Some("volume");
+                        // First one wins, so a group listing two volume
+                        // envelopes takes the one it applies first.
+                        if drives_volume && in_group && group_envelope.is_none() {
+                            group_envelope = envelope_from(&stages);
+                        }
+                        // Cleared so the zone values that follow are not read
+                        // as though they were still inside a modulator.
+                        in_modulator = false;
+                        modulator_kind = None;
+                        modulator_target = None;
+                        stages.clear();
+                    }
+                    b"K2_Group" => {
+                        document.groups.push(group_envelope.take());
+                        in_group = false;
+                    }
+                    _ => {}
+                }
                 depth = depth.saturating_sub(1);
             }
             Ok(Event::Eof) => break,
@@ -210,6 +324,52 @@ pub fn parse(text: &str) -> Result<(NkiDocument, usize), SoundfontError> {
         ));
     }
     Ok((document, skipped))
+}
+
+/// Reads the `name` and `value` attributes of a `<V>` element.
+fn value_pair(element: &quick_xml::events::BytesStart<'_>) -> (Option<String>, Option<String>) {
+    let mut name = None;
+    let mut value = None;
+    #[allow(deprecated)]
+    for attribute in element.attributes().flatten() {
+        match attribute.key.as_ref() {
+            b"name" => name = attribute.unescape_value().ok().map(|text| text.into_owned()),
+            b"value" => value = attribute.unescape_value().ok().map(|text| text.into_owned()),
+            _ => {}
+        }
+    }
+    (name, value)
+}
+
+/// Builds an envelope from the stage times a modulator states.
+///
+/// The times are milliseconds. Nothing in the document says so, but the values
+/// only make sense that way: the accordions here state decays of several
+/// thousand against sustains near unity, which is a reed holding steady, and
+/// releases in the tens, which is a reed stopping.
+fn envelope_from(stages: &BTreeMap<String, String>) -> Option<NkiEnvelope> {
+    let milliseconds = |name: &str| {
+        stages
+            .get(name)
+            .and_then(|text| text.parse::<f32>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value / 1_000.0)
+    };
+    // Without a release there is no envelope worth taking: it is the one stage
+    // the renderer cannot infer, and its absence means this modulator is not
+    // shaped the way this reader assumes.
+    let release_seconds = milliseconds("release")?;
+    Some(NkiEnvelope {
+        attack_seconds: milliseconds("attack").unwrap_or(0.0),
+        hold_seconds: milliseconds("hold").unwrap_or(0.0),
+        decay_seconds: milliseconds("decay").unwrap_or(0.0),
+        sustain_level: stages
+            .get("sustain")
+            .and_then(|text| text.parse::<f32>().ok())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0),
+        release_seconds,
+    })
 }
 
 fn zone_from(values: &BTreeMap<String, String>) -> Option<NkiZone> {
@@ -235,8 +395,11 @@ fn zone_from(values: &BTreeMap<String, String>) -> Option<NkiZone> {
         end: loop_start + loop_length,
     });
 
+    let group = number("groupIdx").unwrap_or(0.0).max(0.0) as usize;
+
     Some(NkiZone {
         sample,
+        group,
         key_low,
         key_high,
         root_key: key("rootKey", 60.0),
@@ -524,6 +687,111 @@ mod tests {
         assert_eq!(document.zones.len(), 2);
         assert_eq!(document.zones[0].sample, "low.wav");
         assert_eq!(document.zones[1].sample, "high.wav");
+    }
+
+    /// A document of two groups, each with its own volume envelope, plus the
+    /// other modulators a real instrument carries alongside them.
+    ///
+    /// Copied from the accordions rather than composed: `K2_IntMod` carries
+    /// only an index and a version, and what kind of modulator it is appears
+    /// on the envelope inside it. A fixture that put the kind on the
+    /// modulator passed while the real files read as having no envelope.
+    const TWO_GROUPS: &str = r#"<?xml version="1.0"?>
+<K2_Container>
+  <Groups>
+    <K2_Group index="0">
+      <IntModulators>
+        <K2_IntMod index="0" version="0.80">
+          <Targets><Target index="0"><V name="target" value="volume"/></Target></Targets>
+          <Envelope type="ahdsr">
+            <V name="attack" value="0."/><V name="hold" value="0."/>
+            <V name="decay" value="9538."/><V name="sustain" value="0.94666701555252075"/>
+            <V name="release" value="33."/>
+          </Envelope>
+        </K2_IntMod>
+        <K2_IntMod index="0" version="0.80">
+          <Targets><Target index="0"><V name="target" value="filterCutoff"/></Target></Targets>
+          <Envelope type="ahdsr">
+            <V name="attack" value="1."/><V name="decay" value="4350."/>
+            <V name="sustain" value="0.43"/><V name="release" value="25000."/>
+          </Envelope>
+        </K2_IntMod>
+      </IntModulators>
+    </K2_Group>
+    <K2_Group index="1">
+      <IntModulators>
+        <K2_IntMod index="0" version="0.80">
+          <Targets><Target index="0"><V name="target" value="volume"/></Target></Targets>
+          <Envelope type="ahdsr">
+            <V name="attack" value="52."/><V name="decay" value="25000."/>
+            <V name="sustain" value="0.949"/><V name="release" value="88."/>
+          </Envelope>
+        </K2_IntMod>
+      </IntModulators>
+    </K2_Group>
+  </Groups>
+  <Zones>
+    <K2_Zone index="0" groupIdx="1">
+      <Parameters><V name="lowKey" value="0"/><V name="highKey" value="127"/></Parameters>
+      <Sample><V name="file_ex2" value="@F00000007000low.wav"/></Sample>
+    </K2_Zone>
+  </Zones>
+</K2_Container>"#;
+
+    #[test]
+    fn the_volume_envelope_of_each_group_is_read() {
+        let (document, _) = parse(TWO_GROUPS).unwrap();
+        assert_eq!(document.groups.len(), 2);
+        let first = document.groups[0].expect("the first group states an envelope");
+        // Milliseconds in the document, seconds here.
+        assert!((first.release_seconds - 0.033).abs() < 1e-6, "{first:?}");
+        assert!((first.decay_seconds - 9.538).abs() < 1e-4, "{first:?}");
+        assert!((first.sustain_level - 0.946_667).abs() < 1e-5, "{first:?}");
+        let second = document.groups[1].expect("the second group states an envelope");
+        assert!((second.release_seconds - 0.088).abs() < 1e-6, "{second:?}");
+        assert!((second.attack_seconds - 0.052).abs() < 1e-6, "{second:?}");
+    }
+
+    #[test]
+    fn a_modulator_driving_something_else_is_not_taken_for_the_envelope() {
+        // The filter sweep in the first group releases over twenty-five
+        // seconds. Reading it as the note's shape would leave every key
+        // ringing long after it was let go.
+        let (document, _) = parse(TWO_GROUPS).unwrap();
+        let first = document.groups[0].unwrap();
+        assert!(first.release_seconds < 1.0, "{first:?}");
+    }
+
+    #[test]
+    fn a_zone_names_the_group_that_shapes_it() {
+        let (document, _) = parse(TWO_GROUPS).unwrap();
+        assert_eq!(document.zones[0].group, 1);
+    }
+
+    #[test]
+    fn modulator_values_do_not_leak_into_the_zones_that_follow() {
+        // Groups are written before zones and are not their parents, so a
+        // reader that kept collecting after a modulator closed would read an
+        // envelope's `attack` as though the zone had stated it.
+        let (document, _) = parse(TWO_GROUPS).unwrap();
+        assert_eq!(document.zones[0].sample, "low.wav");
+        assert_eq!(document.zones[0].volume, 1.0);
+        assert_eq!(document.zones[0].key_high, 127);
+    }
+
+    #[test]
+    fn a_group_without_a_volume_envelope_states_none() {
+        let text = r#"<?xml version="1.0"?>
+<K2_Container>
+  <Groups><K2_Group index="0"><IntModulators/></K2_Group></Groups>
+  <Zones>
+    <K2_Zone index="0" groupIdx="0">
+      <Sample><V name="file_ex2" value="@F00000007000low.wav"/></Sample>
+    </K2_Zone>
+  </Zones>
+</K2_Container>"#;
+        let (document, _) = parse(text).unwrap();
+        assert_eq!(document.groups, vec![None]);
     }
 
     #[test]

@@ -89,7 +89,10 @@ pub fn open(path: impl AsRef<Path>) -> Result<(SampledInstrument, Vec<String>), 
 
     let regions = placements
         .into_iter()
-        .map(|(index, zone)| region_from(zone, index, &samples[index]))
+        .map(|(index, zone)| {
+            let envelope = document.groups.get(zone.group).copied().flatten();
+            region_from(zone, index, &samples[index], envelope)
+        })
         .collect();
 
     let mut instrument = SampledInstrument {
@@ -106,11 +109,31 @@ pub fn open(path: impl AsRef<Path>) -> Result<(SampledInstrument, Vec<String>), 
     Ok((instrument, reports))
 }
 
+/// Shortest release a note is given, whatever the document says.
+///
+/// One library states zero, which is not a release but an edit that stops the
+/// waveform wherever it happens to be. That is a click, and this is the same
+/// few milliseconds the streamed samples are already faded out over.
+const MINIMUM_RELEASE_SECONDS: f32 = 0.005;
+
 fn region_from(
     zone: &super::document::NkiZone,
     wave_index: usize,
     sample: &crate::sample_store::StreamedSample,
+    envelope: Option<super::document::NkiEnvelope>,
 ) -> SampledRegion {
+    let mut envelope = envelope.map_or_else(EnvelopeSpec::default, |shape| EnvelopeSpec {
+        attack_seconds: shape.attack_seconds,
+        // Kontakt's hold stage has nowhere to go here, and is zero in every
+        // library seen. Were it not, the note would reach its sustain a little
+        // early rather than wrongly.
+        decay_seconds: shape.decay_seconds,
+        sustain_level: shape.sustain_level,
+        release_seconds: shape.release_seconds,
+    });
+    // Applied to the default as well, not only to what a document states: an
+    // instrument declaring no volume envelope at all ends on the same edge.
+    envelope.release_seconds = envelope.release_seconds.max(MINIMUM_RELEASE_SECONDS);
     SampledRegion {
         key_low: zone.key_low,
         key_high: zone.key_high,
@@ -130,8 +153,11 @@ fn region_from(
         group: 0,
         off_by: None,
         note_polyphony: None,
-        off_time: 0.005,
-        envelope: EnvelopeSpec::default(),
+        // How long a stolen voice takes to get out of the way. It follows the
+        // note's own release, but only so far: a nine-second tail on every
+        // displaced voice would pile them up faster than they retire.
+        off_time: envelope.release_seconds.clamp(MINIMUM_RELEASE_SECONDS, 0.05),
+        envelope,
         // A loop reaching past the audio is dropped rather than trusted: the
         // recorded length belongs to the file the author had, and a converted
         // or replaced sample may be shorter. It is also dropped if the sample
@@ -216,6 +242,7 @@ mod tests {
             velocity_low: 1,
             velocity_high: 127,
             sample_start: 0,
+            group: 0,
             volume,
             pan: 0.0,
             tune,
@@ -250,32 +277,32 @@ mod tests {
 
     #[test]
     fn unity_volume_and_tuning_translate_to_no_change() {
-        let region = region_from(&zone(1.0, 1.0), 0, &whole(1_000));
+        let region = region_from(&zone(1.0, 1.0), 0, &whole(1_000), None);
         assert!(region.volume_db.abs() < 1e-3, "{}", region.volume_db);
         assert!(region.tune_cents.abs() < 1e-3, "{}", region.tune_cents);
     }
 
     #[test]
     fn a_halved_level_becomes_six_decibels_down() {
-        let region = region_from(&zone(0.5, 1.0), 0, &whole(1_000));
+        let region = region_from(&zone(0.5, 1.0), 0, &whole(1_000), None);
         assert!((region.volume_db + 6.02).abs() < 0.05, "{}", region.volume_db);
     }
 
     #[test]
     fn a_doubled_ratio_becomes_an_octave_of_cents() {
-        let region = region_from(&zone(1.0, 2.0), 0, &whole(1_000));
+        let region = region_from(&zone(1.0, 2.0), 0, &whole(1_000), None);
         assert!((region.tune_cents - 1_200.0).abs() < 0.1, "{}", region.tune_cents);
     }
 
     #[test]
     fn a_silent_zone_does_not_become_negative_infinity() {
-        let region = region_from(&zone(0.0, 1.0), 0, &whole(1_000));
+        let region = region_from(&zone(0.0, 1.0), 0, &whole(1_000), None);
         assert!(region.volume_db.is_finite(), "{}", region.volume_db);
     }
 
     #[test]
     fn placement_survives_the_translation() {
-        let region = region_from(&zone(1.0, 1.0), 3, &whole(1_000));
+        let region = region_from(&zone(1.0, 1.0), 3, &whole(1_000), None);
         assert_eq!((region.key_low, region.key_high), (48, 59));
         assert_eq!(region.pitch_keycenter, 55);
         assert_eq!(region.wave_index, 3);
@@ -288,7 +315,7 @@ mod tests {
             start: 10,
             end: 9_999,
         });
-        assert!(region_from(&source, 0, &whole(1_000)).sample_loop.is_none());
+        assert!(region_from(&source, 0, &whole(1_000), None).sample_loop.is_none());
     }
 
     #[test]
@@ -298,7 +325,59 @@ mod tests {
             start: 100,
             end: 900,
         });
-        assert!(region_from(&source, 0, &whole(1_000)).sample_loop.is_some());
+        assert!(region_from(&source, 0, &whole(1_000), None).sample_loop.is_some());
+    }
+
+    #[test]
+    fn a_group_envelope_shapes_the_regions_it_owns() {
+        let shape = crate::nki::document::NkiEnvelope {
+            attack_seconds: 0.052,
+            hold_seconds: 0.0,
+            decay_seconds: 25.0,
+            sustain_level: 0.949,
+            release_seconds: 0.088,
+        };
+        let region = region_from(&zone(1.0, 1.0), 0, &whole(1_000), Some(shape));
+        assert!((region.envelope.release_seconds - 0.088).abs() < 1e-6);
+        assert!((region.envelope.attack_seconds - 0.052).abs() < 1e-6);
+        assert!((region.envelope.sustain_level - 0.949).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_note_always_gets_enough_release_not_to_click() {
+        // Two ways to arrive at a hard cut: a document that states zero, and
+        // one that states nothing at all. Both are floored.
+        let stated = crate::nki::document::NkiEnvelope {
+            attack_seconds: 0.0,
+            hold_seconds: 0.0,
+            decay_seconds: 0.0,
+            sustain_level: 1.0,
+            release_seconds: 0.0,
+        };
+        for envelope in [Some(stated), None] {
+            let region = region_from(&zone(1.0, 1.0), 0, &whole(1_000), envelope);
+            assert!(
+                region.envelope.release_seconds >= MINIMUM_RELEASE_SECONDS,
+                "{:?}",
+                region.envelope
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_release_does_not_become_a_long_steal() {
+        // A nine-second tail belongs to a note that was let go, not to one
+        // shoved aside by the same key being struck again.
+        let shape = crate::nki::document::NkiEnvelope {
+            attack_seconds: 0.0,
+            hold_seconds: 0.0,
+            decay_seconds: 9.5,
+            sustain_level: 0.95,
+            release_seconds: 9.0,
+        };
+        let region = region_from(&zone(1.0, 1.0), 0, &whole(1_000), Some(shape));
+        assert!((region.envelope.release_seconds - 9.0).abs() < 1e-6);
+        assert!(region.off_time <= 0.05, "{}", region.off_time);
     }
 
     #[test]
@@ -312,7 +391,7 @@ mod tests {
             end: 55_489,
         });
         let streamed = sample(60_000, crate::sample_store::PRELOAD_FRAMES);
-        assert!(region_from(&source, 0, &streamed).sample_loop.is_none());
+        assert!(region_from(&source, 0, &streamed, None).sample_loop.is_none());
     }
 
     #[test]
@@ -410,10 +489,12 @@ mod tests {
                 }
                 let starved: usize = voices.iter().map(crate::Voice::starved_frames).sum();
                 eprintln!(
-                    "{:34} regiones={:3}  {} MiB  nota {note} -> {} voces, pico {peak:.4}, hambre {starved}",
+                    "{:30} regiones={:3}  {} MiB  release {:.0}..{:.0} ms  nota {note} -> {} voces, pico {peak:.4}, hambre {starved}",
                     instrument.name,
                     instrument.regions.len(),
                     instrument.resident_bytes() / 1_048_576,
+                    1000.0 * instrument.regions.iter().map(|r| r.envelope.release_seconds).fold(f32::MAX, f32::min),
+                    1000.0 * instrument.regions.iter().map(|r| r.envelope.release_seconds).fold(0.0, f32::max),
                     voices.len(),
                 );
                 assert!(!voices.is_empty(), "{} played nothing", instrument.name);
