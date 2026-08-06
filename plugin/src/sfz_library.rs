@@ -1,4 +1,4 @@
-//! The SFZ instruments installed beside the plugin.
+//! The instruments installed beside the plugin.
 //!
 //! Streaming changed what this layer can afford. A resident instrument used to
 //! cost 1.7 GiB, which forced a choice between holding one and swapping on
@@ -16,8 +16,12 @@ use rf_soundfonts::sfz::instrument::{CcState, SampledInstrument};
 use rf_soundfonts::streamer::Streamer;
 use rf_soundfonts::Voice;
 
-/// Extension identifying an instrument definition.
-const SFZ_EXTENSION: &str = "sfz";
+/// Extensions identifying an instrument definition.
+///
+/// Both describe the same thing — a keyboard map over a folder of samples —
+/// and both build the same instrument, so a player installing a library does
+/// not need to know which kind it is.
+const INSTRUMENT_EXTENSIONS: [&str; 2] = ["sfz", "nki"];
 
 /// Instruments discovered in the library directory, all resident.
 pub struct SfzLibrary {
@@ -86,7 +90,23 @@ impl SfzLibrary {
         let mut instruments = Vec::new();
         let mut seen: BTreeMap<String, usize> = BTreeMap::new();
         for (library, path) in found {
-            match SampledInstrument::open(&path) {
+            // A Kontakt map reports what it could not use — a zone with no
+            // mapping, a sample that is not where the author left it — while
+            // still playing everything else. Those are carried alongside the
+            // outright failures so the player sees them, because an instrument
+            // missing a handful of notes is easy to miss on stage.
+            let opened = if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("nki"))
+            {
+                rf_soundfonts::nki::instrument::open(&path).map(|(instrument, reports)| {
+                    failures.extend(reports);
+                    instrument
+                })
+            } else {
+                SampledInstrument::open(&path)
+            };
+            match opened {
                 Ok(instrument) => {
                     let name = instrument.name.clone();
                     let id = unique_id(&format!("{library} {name}"), &mut seen);
@@ -195,11 +215,12 @@ fn collect(directory: &Path, library: &str, found: &mut Vec<(String, PathBuf)>) 
     let mut paths: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let is_sfz = path
-            .extension()
-            .map(|extension| extension.eq_ignore_ascii_case(SFZ_EXTENSION))
-            .unwrap_or(false);
-        if is_sfz && path.is_file() {
+        let is_instrument = path.extension().is_some_and(|extension| {
+            INSTRUMENT_EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        });
+        if is_instrument && path.is_file() {
             paths.push(path);
         }
     }
@@ -379,6 +400,22 @@ mod tests {
         let (library, failures) = SfzLibrary::load(&root);
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(library.libraries(), vec!["Real"]);
+    }
+
+    #[test]
+    fn a_kontakt_instrument_is_discovered_alongside_an_sfz() {
+        // Only discovery is checked here: a real `.nki` needs its samples, and
+        // those live on the Pi. What matters is that the file is picked up and
+        // handed to the Kontakt reader, which the error proves — an unreadable
+        // header is a different complaint than never having been looked at.
+        let root = std::env::temp_dir().join(format!("rf-soundfonts-lib-nki-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("map.nki"), b"not a kontakt file at all").unwrap();
+        let (_, failures) = SfzLibrary::load(&root);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("Kontakt"), "{:?}", failures);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

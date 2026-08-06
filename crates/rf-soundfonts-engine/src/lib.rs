@@ -1885,7 +1885,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn a_voice_nobody_faded_keeps_its_full_level() {
         let bank = stereo_fixture(1, vec![0.5; 100], None);
         let mut voice = fixture_voice(&bank, 0.0);
