@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+claxon = "0.4.3"
 hound.workspace = true
 thiserror.workspace = true
 

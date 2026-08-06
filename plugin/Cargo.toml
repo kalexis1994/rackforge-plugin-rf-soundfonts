@@ -10,6 +10,7 @@ repository.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+hound.workspace = true
 rackforge-dsp.workspace = true
 rackforge-plugin-api.workspace = true
 rf-dls = { path = "../crates/rf-dls-engine" }

@@ -527,6 +527,13 @@ impl ProgramLayer {
             pitch_bend_range_cents: self.parameters.pitch_bend_range_semitones * 100.0,
             modulation_depth: self.parameters.modulation_depth,
             gain: self.parameters.gain,
+            // Layers stay centred. Exposing pan per layer needs a new program
+            // field and a document migration, which is separate work from
+            // teaching the renderer to carry two channels.
+            pan: 0.0,
+            // DLS has no velocity-tracking control, so a layer keeps the full
+            // dynamic response the renderer always applied.
+            velocity_tracking: 1.0,
         }
     }
 }

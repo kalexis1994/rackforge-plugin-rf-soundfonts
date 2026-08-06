@@ -38,11 +38,25 @@ entry = "web/config.html"
 major = 1
 minor = 5
 
+# Either source can drive the plugin, so neither is required on its own. A
+# host that has only an SFZ library installed should still load the instrument
+# rather than refuse it over a DLS bank it will never use.
 [[resources]]
 id = "dls-bank"
 name = "DLS Sound Bank"
 kind = "file"
-required = true
+required = false
+data_path = "banks/gm.dls"
+
+# A directory, not a file: an SFZ instrument is a text document plus the folder
+# of samples it references, and the two are useless apart. Each library the
+# player installs becomes a folder inside this one.
+[[resources]]
+id = "sfz-library"
+name = "SFZ Instrument Library"
+kind = "directory"
+required = false
+data_path = "sfz"
 
 [binaries]
 linux-aarch64 = "lib/librackforge_rf_dls.so"

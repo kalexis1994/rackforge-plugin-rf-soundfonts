@@ -1,3 +1,12 @@
+pub mod streamer;
+pub mod spsc;
+pub mod sample_store;
+pub mod pcm_cache;
+pub mod flac;
+pub mod sample;
+pub mod sfz;
+pub mod wav;
+
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -464,6 +473,15 @@ pub struct VoiceConfig {
     pub pitch_bend_range_cents: f32,
     pub modulation_depth: f32,
     pub gain: f32,
+    /// Stereo placement from `-1.0` (hard left) to `1.0` (hard right).
+    pub pan: f32,
+    /// How much of the level follows key velocity, from `0.0` to `1.0`.
+    ///
+    /// A library that has already split its dynamics into separate velocity
+    /// layers asks for `0.0`, so each layer plays at its recorded level
+    /// instead of being scaled a second time. This piano does exactly that,
+    /// five times over.
+    pub velocity_tracking: f32,
 }
 
 impl VoiceConfig {
@@ -476,16 +494,51 @@ impl VoiceConfig {
             pitch_bend_range_cents: 200.0,
             modulation_depth: 1.0,
             gain: 1.0,
+            pan: 0.0,
+            velocity_tracking: 1.0,
         }
     }
 }
 
+/// Per-channel gains for a stereo position.
+///
+/// Centre is unity on both channels rather than the -3 dB of a constant-power
+/// law. That choice is deliberate: every existing DLS voice pans centre, and a
+/// constant-power centre would quietly drop every bank by 3 dB the moment
+/// stereo landed.
+fn pan_gains(pan: f32) -> [f32; 2] {
+    let pan = pan.clamp(-1.0, 1.0);
+    [(1.0 - pan).min(1.0), (1.0 + pan).min(1.0)]
+}
+
+/// Decoded audio for one sample.
+///
+/// `samples` is interleaved by frame, so a stereo wave stores `L R L R`.
+/// Positions and loop points are counted in *frames* everywhere in this crate,
+/// never in individual samples: a loop expressed in samples would mean two
+/// different things for mono and stereo material and would silently halve a
+/// stereo loop.
 #[derive(Clone, Debug)]
 pub struct Wave {
     pub name: String,
     pub sample_rate: u32,
+    pub channels: u8,
+    /// Bit depth of the file this was decoded from.
+    ///
+    /// Kept after decoding so a cache can store the audio at a width that
+    /// cannot lose anything: most libraries are 16-bit, and writing those as
+    /// 32-bit float would double both the cache and the traffic a streaming
+    /// voice generates for no gain at all.
+    pub source_bits: u16,
     pub samples: Arc<[f32]>,
     pub sample_params: Option<SampleParams>,
+}
+
+impl Wave {
+    /// Frames available, independent of channel count.
+    pub fn frame_count(&self) -> usize {
+        self.samples.len() / usize::from(self.channels).max(1)
+    }
 }
 
 #[derive(Debug)]
@@ -588,9 +641,17 @@ fn parse_wave(chunk: &Chunk, bytes: &[u8]) -> Result<Wave, DlsError> {
     let sample_rate = u32_at(format, 4);
     let block_align = u16_at(format, 12);
     let bits = u16_at(format, 14);
-    if format_tag != 1 || channels != 1 || bits != 16 || block_align != 2 {
+    // DLS-1 collections are mono in practice, but nothing in the renderer
+    // requires that any more, and rejecting a stereo wave a bank happens to
+    // carry would fail the whole collection over one sample.
+    if format_tag != 1 || !(1..=2).contains(&channels) || bits != 16 {
         return Err(DlsError::Unsupported(format!(
             "wave format tag={format_tag} channels={channels} bits={bits} align={block_align}"
+        )));
+    }
+    if usize::from(block_align) != usize::from(channels) * 2 {
+        return Err(DlsError::Invalid(format!(
+            "wave block align {block_align} does not match {channels} channels of PCM16"
         )));
     }
     if sample_rate == 0 {
@@ -610,23 +671,29 @@ fn parse_wave(chunk: &Chunk, bytes: &[u8]) -> Result<Wave, DlsError> {
     if samples.is_empty() {
         return Err(DlsError::Invalid("wave contains no samples".into()));
     }
+    if samples.len() % usize::from(channels) != 0 {
+        return Err(DlsError::Invalid(format!(
+            "PCM16 wave holds a partial frame for {channels} channels"
+        )));
+    }
+    let frames = samples.len() / usize::from(channels);
     let sample_params = chunk
         .child(b"wsmp")
         .map(|wsmp| parse_wsmp(wsmp, bytes))
         .transpose()?;
     if let Some(sample_loop) = sample_params.and_then(|params| params.sample_loop)
-        && (sample_loop.start >= sample_loop.end || sample_loop.end > samples.len())
+        && (sample_loop.start >= sample_loop.end || sample_loop.end > frames)
     {
         return Err(DlsError::Invalid(format!(
-            "wave loop {}..{} exceeds {} samples",
-            sample_loop.start,
-            sample_loop.end,
-            samples.len()
+            "wave loop {}..{} exceeds {frames} frames",
+            sample_loop.start, sample_loop.end,
         )));
     }
     Ok(Wave {
         name: info_name(chunk, bytes),
         sample_rate,
+        channels: channels as u8,
+        source_bits: bits,
         samples: Arc::from(samples),
         sample_params,
     })
@@ -904,14 +971,28 @@ impl AmplitudeEnvelope {
     }
 }
 
-#[derive(Clone, Debug)]
+/// A sounding note.
+///
+/// Deliberately not `Clone`. A streaming voice owns one slot out of a fixed
+/// pool, and a copy would hand two voices the same reader: both would drain
+/// the same ring and each would hear half the audio. Voices are moved, never
+/// duplicated.
+#[derive(Debug)]
 pub struct Voice {
     pub note: u8,
+    /// Audio held in memory: the whole sample, or only its head when the rest
+    /// is streamed.
     samples: Arc<[f32]>,
+    /// Supplies frames past the resident head. Absent for resident samples.
+    stream: Option<streamer::StreamWindow>,
+    channels: usize,
+    frame_count: usize,
+    /// Playback cursor in frames, not samples.
     position: f64,
     base_increment: f64,
     sample_loop: Option<SampleLoop>,
     gain: f32,
+    pan_gains: [f32; 2],
     envelope: AmplitudeEnvelope,
     pitch_envelope: Envelope,
     pitch_depth_cents: f32,
@@ -922,6 +1003,15 @@ pub struct Voice {
     pitch_bend_range_cents: f32,
     modulation_depth: f32,
     output_rate: f32,
+    /// Level of a forced fade, and how much of it to remove per frame.
+    ///
+    /// Separate from the amplitude envelope because it answers a different
+    /// question. The envelope is what the instrument sounds like; this is what
+    /// happens when a voice has to stop for a reason the music did not ask
+    /// for — a repeated key taking over from the note still ringing, or the
+    /// voice pool running out.
+    fade_level: f32,
+    fade_step: f32,
     finished: bool,
 }
 
@@ -983,21 +1073,37 @@ impl Voice {
                 instrument.name
             ))
         })?;
+        Self::from_wave(wave, params, note, velocity, output_rate, config)
+    }
+
+    /// Builds a voice from a wave and the parameters to play it with.
+    ///
+    /// This is the format-neutral entry point. DLS arrives through a bank and
+    /// an instrument; SFZ arrives here directly, because an SFZ region resolves
+    /// its own root note, level and stereo position from controller state at
+    /// the moment the key goes down rather than from anything a collection
+    /// stored ahead of time.
+    pub fn from_wave(
+        wave: &Wave,
+        params: SampleParams,
+        note: u8,
+        velocity: u8,
+        output_rate: u32,
+        config: VoiceConfig,
+    ) -> Result<Self, DlsError> {
         if params.unity_note > 127 {
             return Err(DlsError::Invalid(format!(
                 "unity note {} is outside MIDI range",
                 params.unity_note
             )));
         }
+        let frame_count = wave.frame_count();
         if let Some(sample_loop) = params.sample_loop
-            && (sample_loop.start >= sample_loop.end || sample_loop.end > wave.samples.len())
+            && (sample_loop.start >= sample_loop.end || sample_loop.end > frame_count)
         {
             return Err(DlsError::Invalid(format!(
-                "region loop {}..{} exceeds wave {} length {}",
-                sample_loop.start,
-                sample_loop.end,
-                region.wave_index,
-                wave.samples.len()
+                "loop {}..{} exceeds wave {:?} length {frame_count} frames",
+                sample_loop.start, sample_loop.end, wave.name,
             )));
         }
         let pitch_cents =
@@ -1005,14 +1111,23 @@ impl Voice {
         let pitch = 2.0_f64.powf(pitch_cents / 1_200.0);
         let base_increment = f64::from(wave.sample_rate) / f64::from(output_rate) * pitch;
         let attenuation = 10.0_f32.powf(params.attenuation_db / 20.0);
-        let velocity_gain = (f32::from(velocity) / 127.0).powf(0.7);
+        // Blended rather than switched: `velocity_tracking` scales how far the
+        // curve is allowed to pull the level down, so 0.0 leaves a
+        // pre-layered sample at its recorded loudness.
+        let tracking = config.velocity_tracking.clamp(0.0, 1.0);
+        let velocity_gain =
+            1.0 - tracking + tracking * (f32::from(velocity) / 127.0).powf(0.7);
         Ok(Self {
             note,
             samples: Arc::clone(&wave.samples),
+            stream: None,
+            channels: usize::from(wave.channels).max(1),
+            frame_count,
             position: 0.0,
             base_increment,
             sample_loop: params.sample_loop,
             gain: attenuation * velocity_gain * config.gain,
+            pan_gains: pan_gains(config.pan),
             envelope: AmplitudeEnvelope::new(config.amplitude_envelope, output_rate),
             pitch_envelope: Envelope::new(config.pitch_envelope.envelope, output_rate),
             pitch_depth_cents: config.pitch_envelope.depth_cents,
@@ -1025,6 +1140,8 @@ impl Voice {
             pitch_bend_range_cents: config.pitch_bend_range_cents,
             modulation_depth: config.modulation_depth,
             output_rate: output_rate as f32,
+            fade_level: 1.0,
+            fade_step: 0.0,
             finished: false,
         })
     }
@@ -1032,6 +1149,29 @@ impl Voice {
     pub fn note_off(&mut self) {
         self.envelope.note_off();
         self.pitch_envelope.note_off();
+    }
+
+    /// Silences the voice over `seconds` instead of cutting it dead.
+    ///
+    /// Removing a sounding voice from the pool drops its output from whatever
+    /// amplitude the waveform happened to be at straight to zero. That step is
+    /// a click, and it is heard most on a repeated key, where the note still
+    /// ringing is taken over by its own retrigger — which is exactly what
+    /// `note_polyphony=1` describes and what `off_time` is there to soften.
+    ///
+    /// A fade already under way is never made slower, so a voice asked to stop
+    /// twice does not linger.
+    pub fn fade_out(&mut self, seconds: f32) {
+        let frames = (seconds.max(0.0) * self.output_rate).round().max(1.0);
+        let step = self.fade_level / frames;
+        if self.fade_step == 0.0 || step > self.fade_step {
+            self.fade_step = step;
+        }
+    }
+
+    /// Whether the voice is being faded out rather than playing normally.
+    pub fn is_fading(&self) -> bool {
+        self.fade_step > 0.0
     }
 
     pub fn is_finished(&self) -> bool {
@@ -1042,13 +1182,29 @@ impl Voice {
         self.next_sample_modulated(0.0, 0.0)
     }
 
+    /// Mono downmix of [`Voice::next_frame_modulated`].
+    ///
+    /// Kept so callers that genuinely want one number do not have to average a
+    /// frame themselves. A centre-panned mono wave returns exactly what this
+    /// method returned before stereo existed.
     pub fn next_sample_modulated(&mut self, pitch_bend_cents: f32, modulation_wheel: f32) -> f32 {
+        let [left, right] = self.next_frame_modulated(pitch_bend_cents, modulation_wheel);
+        (left + right) * 0.5
+    }
+
+    pub fn next_frame(&mut self) -> [f32; 2] {
+        self.next_frame_modulated(0.0, 0.0)
+    }
+
+    pub fn next_frame_modulated(
+        &mut self,
+        pitch_bend_cents: f32,
+        modulation_wheel: f32,
+    ) -> [f32; 2] {
         if self.is_finished() {
-            return 0.0;
+            return [0.0, 0.0];
         }
-        let end = self
-            .sample_loop
-            .map_or(self.samples.len(), |looping| looping.end);
+        let end = self.sample_loop.map_or(self.frame_count, |looping| looping.end);
         if self.position >= end as f64 {
             if let Some(looping) = self.sample_loop {
                 let length = (looping.end - looping.start) as f64;
@@ -1056,7 +1212,7 @@ impl Voice {
                     looping.start as f64 + (self.position - looping.end as f64) % length;
             } else {
                 self.finished = true;
-                return 0.0;
+                return [0.0, 0.0];
             }
         }
         let index = self.position.floor() as usize;
@@ -1066,7 +1222,9 @@ impl Voice {
         } else {
             self.sample_loop.map_or(index, |looping| looping.start)
         };
-        let sample = self.samples[index] + (self.samples[next] - self.samples[index]) * fraction;
+        // Read the source frame before any gain is applied. A mono wave feeds
+        // both channels so panning behaves the same for either source.
+        let (source_left, source_right) = self.interpolate_frame(index, next, fraction);
         let mut pitch_cents =
             pitch_bend_cents + self.pitch_depth_cents * self.pitch_envelope.next_gain();
         let mut lfo_attenuation_centibels = 0.0;
@@ -1086,7 +1244,105 @@ impl Voice {
         let pitch_ratio = 2.0_f64.powf(f64::from(pitch_cents) / 1_200.0);
         self.position += self.base_increment * pitch_ratio;
         let lfo_gain = 10.0_f32.powf(-lfo_attenuation_centibels / 200.0);
-        sample * self.gain * self.envelope.next_gain() * lfo_gain
+        if self.fade_step > 0.0 {
+            self.fade_level -= self.fade_step;
+            if self.fade_level <= 0.0 {
+                self.fade_level = 0.0;
+                self.finished = true;
+            }
+        }
+        // The envelope advances once per frame, not once per channel, or a
+        // stereo voice would decay at twice the rate of a mono one.
+        let level = self.gain * self.envelope.next_gain() * lfo_gain * self.fade_level;
+        [
+            source_left * level * self.pan_gains[0],
+            source_right * level * self.pan_gains[1],
+        ]
+    }
+
+    /// Builds a voice whose head is resident and whose tail arrives from disk.
+    ///
+    /// `stream` may be absent when every stream in the pool is busy. The note
+    /// then plays from its resident head and stops there, which is a shorter
+    /// note under extreme polyphony rather than a missing one.
+    pub fn from_streamed(
+        sample: &crate::sample_store::StreamedSample,
+        stream: Option<crate::streamer::StreamReader>,
+        params: SampleParams,
+        note: u8,
+        velocity: u8,
+        output_rate: u32,
+        config: VoiceConfig,
+    ) -> Result<Self, DlsError> {
+        let channels = usize::from(sample.channels).max(1);
+        // The head is presented to the renderer as an ordinary resident wave,
+        // so everything below the read path is unchanged whether the audio is
+        // streamed or not.
+        let head = Wave {
+            name: sample.name.clone(),
+            sample_rate: sample.sample_rate,
+            channels: sample.channels,
+            source_bits: 16,
+            samples: Arc::clone(&sample.preload),
+            sample_params: None,
+        };
+        let mut voice = Self::from_wave(&head, params, note, velocity, output_rate, config)?;
+        // `from_wave` sized the voice to the head; the sample is longer.
+        voice.frame_count = sample.frame_count;
+        voice.stream = stream.map(|reader| {
+            crate::streamer::StreamWindow::new(reader, channels, sample.preload_frames)
+        });
+        Ok(voice)
+    }
+
+    /// Frames wanted before the reader could supply them.
+    ///
+    /// Zero on a healthy system. Anything else is the streaming equivalent of
+    /// an underrun and is worth surfacing rather than hiding.
+    pub fn starved_frames(&self) -> usize {
+        self.stream
+            .as_ref()
+            .map_or(0, crate::streamer::StreamWindow::starved_frames)
+    }
+
+    /// Linearly interpolates one frame, widening mono sources to both channels.
+    fn interpolate_frame(&mut self, index: usize, next: usize, fraction: f32) -> (f32, f32) {
+        let Some(here) = self.frame_at(index) else {
+            return (0.0, 0.0);
+        };
+        let Some(ahead) = self.frame_at(next) else {
+            // The following frame has not arrived. Holding this one is better
+            // than interpolating towards a zero that is not in the audio.
+            return (here[0], here[1]);
+        };
+        (
+            here[0] + (ahead[0] - here[0]) * fraction,
+            here[1] + (ahead[1] - here[1]) * fraction,
+        )
+    }
+
+    /// One frame widened to stereo, from resident audio or from the stream.
+    ///
+    /// Returns `None` only when a streamed frame has not arrived yet. The
+    /// caller emits silence for it rather than repeating the previous frame,
+    /// which would leave a DC step that clicks once the stream catches up.
+    fn frame_at(&mut self, frame: usize) -> Option<[f32; 2]> {
+        let resident_frames = self.samples.len() / self.channels;
+        if frame < resident_frames {
+            let base = frame * self.channels;
+            let left = self.samples[base];
+            let right = if self.channels < 2 {
+                left
+            } else {
+                self.samples[base + 1]
+            };
+            return Some([left, right]);
+        }
+        let channels = self.channels;
+        let samples = self.stream.as_mut()?.frame(frame)?;
+        let left = samples[0];
+        let right = if channels < 2 { left } else { samples[1] };
+        Some([left, right])
     }
 
     pub fn next_sample_controlled(
@@ -1094,7 +1350,16 @@ impl Voice {
         pitch_bend_normalized: f32,
         modulation_wheel: f32,
     ) -> f32 {
-        self.next_sample_modulated(
+        let [left, right] = self.next_frame_controlled(pitch_bend_normalized, modulation_wheel);
+        (left + right) * 0.5
+    }
+
+    pub fn next_frame_controlled(
+        &mut self,
+        pitch_bend_normalized: f32,
+        modulation_wheel: f32,
+    ) -> [f32; 2] {
+        self.next_frame_modulated(
             self.pitch_offset_cents
                 + pitch_bend_normalized.clamp(-1.0, 1.0) * self.pitch_bend_range_cents,
             modulation_wheel.clamp(0.0, 1.0) * self.modulation_depth,
@@ -1204,6 +1469,8 @@ mod tests {
             waves: vec![Wave {
                 name: "Synthetic".into(),
                 sample_rate: 48_000,
+                channels: 1,
+                source_bits: 16,
                 samples: Arc::from(vec![0.0; 32]),
                 sample_params: None,
             }],
@@ -1243,6 +1510,8 @@ mod tests {
             waves: vec![Wave {
                 name: "Synthetic".into(),
                 sample_rate: 48_000,
+                channels: 1,
+                source_bits: 16,
                 samples: Arc::from(vec![0.0; 32]),
                 sample_params: None,
             }],
@@ -1282,6 +1551,8 @@ mod tests {
             waves: vec![Wave {
                 name: "Synthetic".into(),
                 sample_rate: 48_000,
+                channels: 1,
+                source_bits: 16,
                 samples: Arc::from(vec![0.0; 32]),
                 sample_params: None,
             }],
@@ -1328,6 +1599,8 @@ mod tests {
             waves: vec![Wave {
                 name: "Synthetic".into(),
                 sample_rate: 48_000,
+                channels: 1,
+                source_bits: 16,
                 samples: Arc::from(vec![0.0; 32]),
                 sample_params: None,
             }],
@@ -1357,5 +1630,216 @@ mod tests {
             halfway_gain = envelope.next_gain();
         }
         assert!((halfway_gain - 10.0_f32.powf(-2.4)).abs() < 1e-5);
+    }
+
+    /// One region covering the whole keyboard, played at its unity note so the
+    /// playback rate is exactly one frame per output frame.
+    fn stereo_fixture(channels: u8, samples: Vec<f32>, sample_loop: Option<SampleLoop>) -> DlsBank {
+        DlsBank {
+            instruments: vec![Instrument {
+                name: "Fixture".into(),
+                bank: 0,
+                program: 0,
+                regions: vec![Region {
+                    key_low: 0,
+                    key_high: 127,
+                    velocity_low: 0,
+                    velocity_high: 127,
+                    wave_index: 0,
+                    key_group: 0,
+                    sample_params: Some(SampleParams {
+                        unity_note: 60,
+                        fine_tune: 0,
+                        attenuation_db: 0.0,
+                        sample_loop,
+                    }),
+                }],
+                envelope: EnvelopeSpec::default(),
+                pitch_envelope: PitchEnvelopeSpec::default(),
+                lfo: LfoSpec::default(),
+            }],
+            waves: vec![Wave {
+                name: "Fixture".into(),
+                sample_rate: 48_000,
+                channels,
+                source_bits: 16,
+                samples: Arc::from(samples),
+                sample_params: None,
+            }],
+        }
+    }
+
+    fn fixture_voice(bank: &DlsBank, pan: f32) -> Voice {
+        let instrument = &bank.instruments[0];
+        let mut config = VoiceConfig::inherit(instrument);
+        config.pan = pan;
+        Voice::new_with_config(
+            bank,
+            instrument,
+            &instrument.regions[0],
+            60,
+            127,
+            48_000,
+            config,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn frame_count_is_independent_of_channel_count() {
+        let mono = stereo_fixture(1, vec![0.0; 8], None);
+        let stereo = stereo_fixture(2, vec![0.0; 8], None);
+        assert_eq!(mono.waves[0].frame_count(), 8);
+        assert_eq!(stereo.waves[0].frame_count(), 4);
+    }
+
+    #[test]
+    fn a_mono_source_feeds_both_channels_equally() {
+        let bank = stereo_fixture(1, vec![0.5, 0.5, 0.5, 0.5], None);
+        let [left, right] = fixture_voice(&bank, 0.0).next_frame();
+        assert!((left - right).abs() < 1e-6, "mono must stay centred");
+        assert!(left > 0.0);
+    }
+
+    #[test]
+    fn a_stereo_source_keeps_its_channels_apart() {
+        // Frames are interleaved: left is always 1.0, right always -1.0.
+        let bank = stereo_fixture(2, vec![1.0, -1.0, 1.0, -1.0], None);
+        let [left, right] = fixture_voice(&bank, 0.0).next_frame();
+        assert!(left > 0.0, "left channel lost its sign");
+        assert!(right < 0.0, "right channel was overwritten by the left");
+    }
+
+    #[test]
+    fn centre_pan_does_not_change_the_level_of_an_existing_bank() {
+        // The regression this guards: adopting a constant-power pan law would
+        // drop every DLS voice ever rendered by 3 dB.
+        assert_eq!(pan_gains(0.0), [1.0, 1.0]);
+    }
+
+    #[test]
+    fn panning_hard_silences_the_opposite_channel() {
+        assert_eq!(pan_gains(-1.0), [1.0, 0.0]);
+        assert_eq!(pan_gains(1.0), [0.0, 1.0]);
+        let bank = stereo_fixture(1, vec![0.5; 8], None);
+        let [left, right] = fixture_voice(&bank, -1.0).next_frame();
+        assert!(left > 0.0);
+        assert_eq!(right, 0.0);
+    }
+
+    #[test]
+    fn a_pan_beyond_the_legal_range_is_clamped_rather_than_inverted() {
+        assert_eq!(pan_gains(-4.0), pan_gains(-1.0));
+        assert_eq!(pan_gains(4.0), pan_gains(1.0));
+    }
+
+    #[test]
+    fn a_stereo_loop_counts_frames_rather_than_samples() {
+        // Four frames of stereo. Looping 0..4 must replay all of them; a loop
+        // read as samples would turn back after two and halve the loop.
+        let bank = stereo_fixture(
+            2,
+            vec![0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4],
+            Some(SampleLoop { start: 0, end: 4 }),
+        );
+        let mut voice = fixture_voice(&bank, 0.0);
+        let lefts: Vec<f32> = (0..4).map(|_| voice.next_frame()[0]).collect();
+        assert!(
+            lefts[3] > lefts[2] && lefts[2] > lefts[1],
+            "the fourth frame was not reached: {lefts:?}"
+        );
+    }
+
+    #[test]
+    fn a_stereo_voice_decays_at_the_same_rate_as_a_mono_one() {
+        // The envelope must advance once per frame, not once per channel.
+        let release = EnvelopeSpec {
+            attack_seconds: 0.0,
+            decay_seconds: 0.0,
+            sustain_level: 1.0,
+            release_seconds: 1.0,
+        };
+        let mut mono = AmplitudeEnvelope::new(release, 100);
+        let mut stereo = AmplitudeEnvelope::new(release, 100);
+        mono.note_off();
+        stereo.note_off();
+        for _ in 0..25 {
+            mono.next_gain();
+            stereo.next_gain();
+        }
+        assert_eq!(mono.next_gain(), stereo.next_gain());
+    }
+
+    #[test]
+    fn a_faded_voice_reaches_silence_without_a_step() {
+        // The click this fixes: a displaced voice used to drop from whatever
+        // amplitude it held straight to zero in one frame.
+        let bank = stereo_fixture(1, vec![0.5; 4_000], None);
+        let mut voice = fixture_voice(&bank, 0.0);
+        voice.next_frame();
+        voice.fade_out(0.01);
+        let mut previous = voice.next_frame()[0];
+        let mut frames = 1;
+        while !voice.is_finished() && frames < 48_000 {
+            let value = voice.next_frame()[0];
+            assert!(
+                (value - previous).abs() < 0.02,
+                "step of {} at frame {frames}",
+                value - previous
+            );
+            previous = value;
+            frames += 1;
+        }
+        assert!(voice.is_finished(), "the fade never reached silence");
+        assert!(previous.abs() < 1e-3, "it stopped at {previous}");
+    }
+
+    #[test]
+    fn a_fade_takes_roughly_the_time_it_was_given() {
+        let bank = stereo_fixture(1, vec![0.5; 96_000], None);
+        let mut voice = fixture_voice(&bank, 0.0);
+        voice.fade_out(0.1);
+        let mut frames = 0;
+        while !voice.is_finished() && frames < 96_000 {
+            voice.next_frame();
+            frames += 1;
+        }
+        // 0.1 s at 48 kHz is 4800 frames; allow for rounding on either side.
+        assert!(
+            (4_700..=4_900).contains(&frames),
+            "a 0.1 s fade took {frames} frames"
+        );
+    }
+
+    #[test]
+    fn asking_twice_never_makes_a_fade_slower() {
+        // A voice told to stop urgently must not be rescued by a later, gentler
+        // request; the second key press still needs the first voice gone.
+        let bank = stereo_fixture(1, vec![0.5; 96_000], None);
+        let mut voice = fixture_voice(&bank, 0.0);
+        voice.fade_out(0.005);
+        voice.fade_out(1.0);
+        let mut frames = 0;
+        while !voice.is_finished() && frames < 96_000 {
+            voice.next_frame();
+            frames += 1;
+        }
+        assert!(frames < 1_000, "the slower request won: {frames} frames");
+    }
+
+    #[test]
+    fn a_voice_nobody_faded_keeps_its_full_level() {
+        let bank = stereo_fixture(1, vec![0.5; 100], None);
+        let mut voice = fixture_voice(&bank, 0.0);
+        assert!(!voice.is_fading());
+        assert!(voice.next_frame()[0] > 0.0);
+    }
+
+    #[test]
+    fn the_mono_downmix_matches_a_centred_frame() {
+        let bank = stereo_fixture(1, vec![0.5; 8], None);
+        let expected = fixture_voice(&bank, 0.0).next_frame()[0];
+        let actual = fixture_voice(&bank, 0.0).next_sample();
+        assert!((expected - actual).abs() < 1e-6);
     }
 }

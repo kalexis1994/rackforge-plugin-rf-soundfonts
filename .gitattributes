@@ -1,0 +1,22 @@
+# The plugin is built and packaged on Linux even when it is authored on
+# Windows. A shell script or a manifest checked out with CRLF fails there in
+# ways that look nothing like a line-ending problem, so the text formats that
+# cross the boundary are pinned to LF.
+* text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
+*.sh text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.conf text eol=lf
+*.sfz text eol=lf
+*.ps1 text eol=crlf
+
+# Sample material is binary whatever its extension suggests.
+*.wav binary
+*.flac binary
+*.dls binary
+*.pcm binary

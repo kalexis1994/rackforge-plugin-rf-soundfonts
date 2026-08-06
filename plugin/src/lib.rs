@@ -1,7 +1,8 @@
 mod custom_program;
 mod program_editor;
-
+mod sfz_library;
 use custom_program::{CustomProgram, CustomProgramPayload, DlsSource, ProgramLayer, SharedEffects};
+
 use rackforge_dsp::{Chorus, Exciter, Reverb, StereoFrame};
 use rackforge_plugin_api::abi::{
     HostApiV1, LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_WARN, MidiEventV1,
@@ -24,7 +25,12 @@ use std::path::PathBuf;
 use std::ptr;
 use std::slice;
 
+/// Seconds to fade a voice displaced by a retrigger when the instrument does
+/// not say. Long enough to remove the step, short enough to be inaudible.
+const DISPLACED_VOICE_FADE_SECONDS: f32 = 0.005;
+
 const RESOURCE_ID: &[u8] = b"dls-bank";
+const SFZ_RESOURCE_ID: &[u8] = b"sfz-library";
 const PIANO_PRESET_ID: &str = "gm.piano-1";
 const MASTER_GAIN_PARAMETER: u32 = 0;
 const DEFAULT_MASTER_GAIN: f32 = 0.65;
@@ -110,6 +116,11 @@ struct RfDls {
     selected_program: u32,
     selected_preset_id: String,
     custom_programs: Vec<CustomProgram>,
+    /// Every installed SFZ instrument, all resident. Absent when no library
+    /// resource is installed.
+    sfz: Option<sfz_library::SfzLibrary>,
+    /// Which of them currently receives notes. `None` means the DLS path.
+    selected_sfz: Option<usize>,
 }
 
 impl RfDls {
@@ -151,7 +162,14 @@ impl RfDls {
             selected_program,
             selected_preset_id: dynamic_preset_id(selected_bank, selected_program),
             custom_programs,
+            sfz: None,
+            selected_sfz: None,
         }
+    }
+
+    /// Adopts an SFZ library discovered beside the plugin.
+    pub fn attach_sfz(&mut self, library: sfz_library::SfzLibrary) {
+        self.sfz = Some(library);
     }
 
     fn reset(&mut self) {
@@ -275,6 +293,12 @@ impl RfDls {
     }
 
     fn select_preset(&mut self, preset_id: &str) -> bool {
+        if let Some(id) = sfz_library::instrument_id(preset_id) {
+            return self.select_sfz(id, preset_id);
+        }
+        // Leaving an SFZ instrument returns the plugin to the DLS path, whose
+        // layers the SFZ instruments never used.
+        self.selected_sfz = None;
         if preset_id.starts_with("custom.") {
             return self.select_custom(preset_id);
         }
@@ -284,6 +308,28 @@ impl RfDls {
             parse_dynamic_preset_id(preset_id)
         };
         selection.is_some_and(|(bank, program)| self.select_instrument(bank, program))
+    }
+
+    /// Points the keyboard at one loaded SFZ instrument.
+    ///
+    /// Switching costs nothing measurable: every instrument was loaded at
+    /// start-up and stays resident, so this only changes which one receives
+    /// the notes. That is the whole point of the streaming work.
+    fn select_sfz(&mut self, instrument_id: &str, preset_id: &str) -> bool {
+        let Some(index) = self
+            .sfz
+            .as_ref()
+            .and_then(|library| library.index_of(instrument_id))
+        else {
+            return false;
+        };
+        self.selected_sfz = Some(index);
+        self.selected_preset_id = preset_id.to_owned();
+        // Layers belong to the DLS side. An SFZ instrument carries its own
+        // regions and must not inherit a split left over from another sound.
+        self.active_layers.clear();
+        self.reset();
+        true
     }
 
     fn has_preset(&self, preset_id: &str) -> bool {
@@ -416,7 +462,7 @@ impl RfDls {
         }
         self.custom_programs
             .sort_by_key(|program| (program.slot, program.id.clone()));
-        publish_dynamic_catalog(&self.host, &self.bank, &self.custom_programs)
+        publish_dynamic_catalog(&self.host, &self.bank, &self.custom_programs, self.sfz.as_ref())
     }
 
     fn set_parameter(&mut self, index: u32, value: f64) -> i32 {
@@ -435,7 +481,32 @@ impl RfDls {
 
     fn note_on(&mut self, note: u8, velocity: u8) {
         self.held_notes[note as usize] = true;
-        self.voices.retain(|voice| voice.note != note);
+        // Faded, never dropped. Removing a sounding voice takes its output
+        // from wherever the waveform happened to be straight to zero, and that
+        // step is a click. It is heard on a repeated key, where the note still
+        // ringing is displaced by its own retrigger — exactly the case
+        // `note_polyphony=1` describes and `off_time` exists to soften.
+        let fade = self
+            .selected_sfz
+            .and_then(|index| self.sfz.as_ref().map(|library| library.off_time(index)))
+            .unwrap_or(DISPLACED_VOICE_FADE_SECONDS);
+        for voice in self.voices.iter_mut().filter(|voice| voice.note == note) {
+            voice.fade_out(fade);
+        }
+        if let Some(index) = self.selected_sfz {
+            // An SFZ instrument resolves its own regions, levels and stereo
+            // placement from controller state, so it bypasses the layer and
+            // program machinery entirely rather than being squeezed into it.
+            if let Some(library) = self.sfz.as_ref() {
+                for voice in library.voices_for_note(index, note, velocity, self.sample_rate) {
+                    if self.voices.len() >= MAX_VOICES {
+                        self.voices.remove(0);
+                    }
+                    self.voices.push(voice);
+                }
+            }
+            return;
+        }
         let bank = &self.bank;
         for layer in &self.active_layers {
             if !layer.accepts(note, velocity) {
@@ -530,6 +601,16 @@ impl RfDls {
             return;
         }
         let status = event.data[0] & 0xf0;
+        // Every control change reaches the SFZ side, whatever it is. An SFZ
+        // instrument decides its microphone balance, level, stereo image and
+        // release length from arbitrary controllers, so filtering to the ones
+        // the DLS path recognises would silence half of what the author wrote.
+        if status == 0xb0
+            && event.length >= 3
+            && let Some(library) = self.sfz.as_mut()
+        {
+            library.set_controller(event.data[1] & 0x7f, event.data[2] & 0x7f);
+        }
         match status {
             0x80 if event.length >= 3 => self.note_off(event.data[1] & 0x7f),
             0x90 if event.length >= 3 && event.data[2] != 0 => {
@@ -550,20 +631,30 @@ impl RfDls {
         }
     }
 
-    fn render_frame(&mut self) -> f32 {
+    /// Sums every live voice into one stereo frame.
+    ///
+    /// Voices carry their own stereo position now, so the mix stays in two
+    /// channels the whole way. Collapsing to mono here and widening again
+    /// downstream would discard both the panning and the natural width of a
+    /// stereo sample.
+    fn render_frame(&mut self) -> StereoFrame {
         self.program_gain += (self.program_gain_target - self.program_gain) * 0.005;
-        let mut mixed = 0.0_f32;
+        let mut left = 0.0_f32;
+        let mut right = 0.0_f32;
         let mut index = 0;
         while index < self.voices.len() {
-            mixed += self.voices[index]
-                .next_sample_controlled(self.pitch_bend_normalized, self.modulation_wheel);
+            let [voice_left, voice_right] = self.voices[index]
+                .next_frame_controlled(self.pitch_bend_normalized, self.modulation_wheel);
+            left += voice_left;
+            right += voice_right;
             if self.voices[index].is_finished() {
                 self.voices.swap_remove(index);
             } else {
                 index += 1;
             }
         }
-        mixed * self.master_gain * self.program_gain
+        let gain = self.master_gain * self.program_gain;
+        StereoFrame::new(left * gain, right * gain)
     }
 }
 
@@ -591,7 +682,11 @@ fn parse_dynamic_preset_id(id: &str) -> Option<(u32, u32)> {
     ))
 }
 
-fn dynamic_catalog(bank: &DlsBank, custom_programs: &[CustomProgram]) -> PresetCatalog {
+fn dynamic_catalog(
+    bank: &DlsBank,
+    custom_programs: &[CustomProgram],
+    sfz: Option<&sfz_library::SfzLibrary>,
+) -> PresetCatalog {
     let mut seen = BTreeSet::new();
     let mut presets = Vec::new();
     let mut instruments = bank.instruments.iter().collect::<Vec<_>>();
@@ -646,28 +741,125 @@ fn dynamic_catalog(bank: &DlsBank, custom_programs: &[CustomProgram]) -> PresetC
             editable: true,
         });
     }
+    // Only banks with something in them are published. An installation driven
+    // by SFZ alone should not make the player scroll past an empty DLS bank
+    // and an empty CUSTOM bank to reach the instrument they installed.
+    let mut banks = Vec::new();
+    if !bank.instruments.is_empty() {
+        banks.push(BankDescriptor {
+            id: "dls".into(),
+            name: "DLS".into(),
+            order: 0,
+        });
+    }
+    if !custom_programs.is_empty() {
+        banks.push(BankDescriptor {
+            id: "custom".into(),
+            name: "CUSTOM".into(),
+            order: 1,
+        });
+    }
+
+    // One bank per installed library, so a player picks the library first and
+    // the instrument second. With twenty instruments a single flat list is
+    // unusable on a two-line controller display, and the grouping matches how
+    // the material arrives: one folder per library.
+    if let Some(library) = sfz {
+        for (offset, name) in library.libraries().iter().enumerate() {
+            banks.push(BankDescriptor {
+                id: sfz_bank_id(name),
+                name: (*name).to_string(),
+                order: 2 + offset as i32,
+            });
+        }
+        for (offset, loaded) in library.instruments().iter().enumerate() {
+            presets.push(PresetDescriptor {
+                id: sfz_library::preset_id(&loaded.id),
+                name: loaded.name.clone(),
+                description: Some(format!(
+                    "{} MiB",
+                    loaded.instrument.resident_bytes() / 1_048_576
+                )),
+                bank: Some(sfz_bank_id(&loaded.library)),
+                category: Some("Instrument".into()),
+                order: offset as i32,
+                tags: vec!["sfz".into()],
+                editable: false,
+            });
+        }
+    }
+
     PresetCatalog {
         schema_version: 1,
-        banks: vec![
-            BankDescriptor {
-                id: "dls".into(),
-                name: "DLS".into(),
-                order: 0,
-            },
-            BankDescriptor {
-                id: "custom".into(),
-                name: "CUSTOM".into(),
-                order: 1,
-            },
-        ],
+        banks,
         presets,
     }
+}
+
+#[cfg(test)]
+mod bank_id_tests {
+    use super::sfz_bank_id;
+
+    #[test]
+    fn a_library_is_not_renamed_after_its_file_format() {
+        // A library called Headroom Piano is not called SFZ Headroom Piano.
+        assert_eq!(sfz_bank_id("HeadroomPiano"), "headroompiano");
+        assert!(!sfz_bank_id("VSCO2").starts_with("sfz"));
+    }
+
+    #[test]
+    fn punctuation_becomes_a_single_separator() {
+        assert_eq!(sfz_bank_id("Virtual Playing  Orchestra"), "virtual-playing-orchestra");
+        assert_eq!(sfz_bank_id("VSCO-2 CE"), "vsco-2-ce");
+    }
+
+    #[test]
+    fn a_library_cannot_take_over_a_bank_this_plugin_owns() {
+        assert_ne!(sfz_bank_id("DLS"), "dls");
+        assert_ne!(sfz_bank_id("custom"), "custom");
+    }
+
+    #[test]
+    fn a_nameless_folder_still_yields_an_identifier() {
+        assert_eq!(sfz_bank_id("!!!"), "library");
+    }
+}
+
+/// Bank identifier for a library, derived from its folder name.
+///
+/// Not prefixed. The identifier is meant to be internal, but it surfaces in
+/// logs and can surface in a UI, and a library called Headroom Piano is not
+/// called SFZ Headroom Piano — the format it happens to be written in is not
+/// part of its name. Only the two names this plugin already owns are given a
+/// suffix, and only if a library collides with them.
+fn sfz_bank_id(library: &str) -> String {
+    let mut id = String::with_capacity(library.len());
+    let mut separator = false;
+    for byte in library.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            if separator && !id.is_empty() {
+                id.push('-');
+            }
+            id.push(char::from(byte.to_ascii_lowercase()));
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    if id.is_empty() {
+        id.push_str("library");
+    }
+    if id == "dls" || id == "custom" {
+        id.push_str("-library");
+    }
+    id
 }
 
 fn publish_dynamic_catalog(
     host: &HostApiV1,
     bank: &DlsBank,
     custom_programs: &[CustomProgram],
+    sfz: Option<&sfz_library::SfzLibrary>,
 ) -> Result<(), String> {
     if version_major(host.api_version) != 1
         || version_minor(host.api_version) < 3
@@ -678,7 +870,7 @@ fn publish_dynamic_catalog(
     let callback = host
         .publish_preset_catalog
         .ok_or_else(|| "host dynamic preset callback is unavailable".to_owned())?;
-    let bytes = serde_json::to_vec(&dynamic_catalog(bank, custom_programs))
+    let bytes = serde_json::to_vec(&dynamic_catalog(bank, custom_programs, sfz))
         .map_err(|error| error.to_string())?;
     // SAFETY: bytes remain readable for the callback duration.
     let status = unsafe { callback(host.context, bytes.as_ptr(), bytes.len()) };
@@ -691,6 +883,20 @@ fn publish_dynamic_catalog(
 }
 
 fn resource_path(host: &HostApiV1) -> Result<PathBuf, String> {
+    named_resource_path(host, RESOURCE_ID)
+}
+
+/// Names a resource in a message.
+fn label(resource: &[u8]) -> String {
+    String::from_utf8_lossy(resource).into_owned()
+}
+
+/// Asks the host where one declared resource was installed.
+///
+/// Generalised from the single-bank original because the plugin now has two
+/// sources and either may be absent: a missing resource is a fact to act on,
+/// not a failure.
+fn named_resource_path(host: &HostApiV1, resource: &[u8]) -> Result<PathBuf, String> {
     if version_major(host.api_version) != 1
         || version_minor(host.api_version) < 1
         || host.struct_size < size_of::<HostApiV1>() as u32
@@ -700,34 +906,35 @@ fn resource_path(host: &HostApiV1) -> Result<PathBuf, String> {
     let callback = host
         .get_resource_path
         .ok_or_else(|| "host resource callback is unavailable".to_owned())?;
-    // SAFETY: RESOURCE_ID is readable and a null destination queries the size.
+    // SAFETY: `resource` is readable and a null destination queries the size.
     let required = unsafe {
         callback(
             host.context,
-            RESOURCE_ID.as_ptr(),
-            RESOURCE_ID.len(),
+            resource.as_ptr(),
+            resource.len(),
             ptr::null_mut(),
             0,
         )
     };
     if required == 0 || required > 32 * 1024 {
-        return Err("dls-bank resource is missing or invalid".into());
+        return Err(format!("{} is missing or invalid", label(resource)));
     }
     let mut bytes = vec![0_u8; required];
     // SAFETY: the destination has exactly the size reported by the host.
     let reported = unsafe {
         callback(
             host.context,
-            RESOURCE_ID.as_ptr(),
-            RESOURCE_ID.len(),
+            resource.as_ptr(),
+            resource.len(),
             bytes.as_mut_ptr(),
             bytes.len(),
         )
     };
     if reported != required {
-        return Err("dls-bank path changed while being read".into());
+        return Err(format!("{} moved while being read", label(resource)));
     }
-    let text = String::from_utf8(bytes).map_err(|_| "dls-bank path is not UTF-8".to_owned())?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("{} has a non-UTF-8 path", label(resource)))?;
     Ok(PathBuf::from(text))
 }
 
@@ -775,8 +982,27 @@ unsafe extern "C" fn create(host: *const HostApiV1) -> *mut c_void {
     let Some(host) = (unsafe { host.as_ref() }) else {
         return ptr::null_mut();
     };
-    let result = resource_path(host)
+    // A missing DLS bank is no longer fatal. The plugin has two sources now,
+    // and an installation driven entirely by an SFZ library must still load;
+    // refusing it over a bank the player never installed would be the same
+    // mistake as demanding hardware the host does not have.
+    let bank = match resource_path(host)
         .and_then(|path| DlsBank::open(path).map_err(|error| error.to_string()))
+    {
+        Ok(bank) => bank,
+        Err(reason) => {
+            log_host(
+                host,
+                LOG_LEVEL_INFO,
+                &format!("no DLS bank available ({reason}); running on SFZ alone"),
+            );
+            DlsBank {
+                instruments: Vec::new(),
+                waves: Vec::new(),
+            }
+        }
+    };
+    let result = Ok::<DlsBank, String>(bank)
         .and_then(|bank| plugin_data_path(host).map(|data_root| (bank, data_root)))
         .and_then(|(bank, data_root)| {
             let (mut custom_programs, warnings) =
@@ -812,8 +1038,11 @@ unsafe extern "C" fn create(host: *const HostApiV1) -> *mut c_void {
                 })
                 .or_else(|| bank.instruments.first())
                 .map(|instrument| (instrument.bank, instrument.program))
-                .ok_or_else(|| "DLS bank contains no selectable instruments".to_owned())?;
-            publish_dynamic_catalog(host, &bank, &custom_programs)?;
+                // An empty bank leaves the selection pointing at nothing,
+                // which is correct: an SFZ preset will replace it, and until
+                // one is chosen the plugin simply has no sound to make.
+                .unwrap_or((0, 0));
+            publish_dynamic_catalog(host, &bank, &custom_programs, None)?;
             Ok((bank, default, custom_programs))
         });
     match result {
@@ -826,14 +1055,41 @@ unsafe extern "C" fn create(host: *const HostApiV1) -> *mut c_void {
                     custom_programs.len()
                 ),
             );
-            Box::into_raw(Box::new(RfDls::new(
+            let mut plugin = RfDls::new(
                 *host,
                 bank,
                 selected_bank,
                 selected_program,
                 custom_programs,
-            )))
-            .cast()
+            );
+            // Loaded after the DLS bank so a library that fails to read leaves
+            // a working instrument rather than no instrument at all.
+            if let Ok(root) = named_resource_path(host, SFZ_RESOURCE_ID) {
+                let (library, failures) = sfz_library::SfzLibrary::load(&root);
+                for failure in &failures {
+                    log_host(host, LOG_LEVEL_INFO, &format!("SFZ skipped: {failure}"));
+                }
+                if !library.is_empty() {
+                    log_host(
+                        host,
+                        LOG_LEVEL_INFO,
+                        &format!(
+                            "SFZ loaded {} instruments from {} libraries, {} MiB resident",
+                            library.instruments().len(),
+                            library.libraries().len(),
+                            library.resident_bytes() / 1_048_576
+                        ),
+                    );
+                    plugin.attach_sfz(library);
+                    let _ = publish_dynamic_catalog(
+                        host,
+                        &plugin.bank,
+                        &plugin.custom_programs,
+                        plugin.sfz.as_ref(),
+                    );
+                }
+            }
+            Box::into_raw(Box::new(plugin)).cast()
         }
         Err(error) => {
             log_host(host, LOG_LEVEL_ERROR, &error);
@@ -1143,8 +1399,8 @@ unsafe extern "C" fn process(instance: *mut c_void, block: *const ProcessBlockV1
             plugin.handle_midi(midi[midi_index]);
             midi_index += 1;
         }
-        let sample = plugin.render_frame();
-        let excited = plugin.exciter.process(StereoFrame::splat(sample));
+        let mixed = plugin.render_frame();
+        let excited = plugin.exciter.process(mixed);
         let chorused = plugin.chorus.process(excited);
         let processed = plugin.reverb.process(chorused);
         let start = frame as usize * block.output_channels as usize;
@@ -1478,6 +1734,8 @@ mod tests {
                 waves: vec![Wave {
                     name: "Synthetic Wave".into(),
                     sample_rate: 48_000,
+                    channels: 1,
+                    source_bits: 16,
                     samples: Arc::from(samples),
                     sample_params: None,
                 }],
@@ -1526,7 +1784,7 @@ mod tests {
     #[test]
     fn dynamic_catalog_uses_opaque_stable_ids() {
         let plugin = synthetic_plugin();
-        let catalog = dynamic_catalog(&plugin.bank, &[]);
+        let catalog = dynamic_catalog(&plugin.bank, &[], plugin.sfz.as_ref());
         assert_eq!(catalog.validate(), Ok(()));
         assert_eq!(catalog.presets.len(), 1);
         assert_eq!(catalog.presets[0].id, "dls.b00000000.p00000000");
@@ -1541,7 +1799,7 @@ mod tests {
     fn custom_programs_are_separate_and_survive_state_round_trip() {
         let mut plugin = synthetic_plugin();
         plugin.custom_programs.push(custom_program());
-        let catalog = dynamic_catalog(&plugin.bank, &plugin.custom_programs);
+        let catalog = dynamic_catalog(&plugin.bank, &plugin.custom_programs, plugin.sfz.as_ref());
         assert_eq!(catalog.validate(), Ok(()));
         assert_eq!(catalog.banks[0].name, "DLS");
         assert_eq!(catalog.banks[1].name, "CUSTOM");
@@ -1731,7 +1989,7 @@ mod tests {
         let mut plugin = synthetic_plugin();
         plugin.note_on(60, 127);
         assert_eq!(plugin.voices.len(), 1);
-        assert_ne!(plugin.render_frame(), 0.0);
+        assert_ne!(plugin.render_frame().mono(), 0.0);
         plugin.note_off(60);
         assert!(!plugin.held_notes[60]);
         for _ in 0..600 {
