@@ -1,3 +1,5 @@
+pub mod kontakt5;
+pub mod fastlz;
 pub mod nki;
 pub mod smpl;
 pub mod streamer;
