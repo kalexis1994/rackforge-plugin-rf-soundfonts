@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: kalexis1994/rackforge
-          ref: cd6b5a889b9d29eac857bdf452ad9a5ae102b9e0
+          ref: 0fd1b678a3f3c15eb5107d28151440fa423b712c
           path: rackforge
           ssh-key: ${{ secrets.RACKFORGE_DEPLOY_KEY }}
           persist-credentials: false
