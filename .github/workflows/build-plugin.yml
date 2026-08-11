@@ -18,10 +18,15 @@ jobs:
     name: Portable .rfplugin
     runs-on: windows-2022
     timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: rf-soundfonts
 
     steps:
       - name: Check out RF-Soundfonts
         uses: actions/checkout@v4
+        with:
+          path: rf-soundfonts
 
       - name: Require RackForge deploy key
         shell: pwsh
@@ -37,16 +42,14 @@ jobs:
         with:
           repository: kalexis1994/rackforge
           ref: cd6b5a889b9d29eac857bdf452ad9a5ae102b9e0
-          path: rackforge-host
+          path: rackforge
           ssh-key: ${{ secrets.RACKFORGE_DEPLOY_KEY }}
           persist-credentials: false
 
       - name: Use the pinned local SDK checkout
         shell: pwsh
         run: |
-          $config = Get-Content -Raw .cargo/config.toml.example
-          $config = $config.Replace('../rackforge/', 'rackforge-host/')
-          Set-Content -LiteralPath .cargo/config.toml -Value $config -NoNewline
+          Copy-Item .cargo/config.toml.example .cargo/config.toml
 
       - name: Set up Rust and WebAssembly target
         shell: pwsh
@@ -69,7 +72,7 @@ jobs:
           $version = $Matches[1]
           $output = Join-Path $PWD "artifacts/RF-Soundfonts-$version.rfplugin"
           ./tools/build-portable-package.ps1 `
-            -RackForgeRoot (Join-Path $PWD 'rackforge-host') `
+            -RackForgeRoot (Join-Path (Split-Path $PWD) 'rackforge') `
             -Output $output
           $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $output).Hash.ToLowerInvariant()
           "$digest  $([System.IO.Path]::GetFileName($output))" |
