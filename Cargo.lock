@@ -450,10 +450,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rackforge-dsp"
-version = "0.1.0"
-
-[[package]]
 name = "rackforge-midi-api"
 version = "0.1.0"
 dependencies = [
@@ -493,7 +489,6 @@ name = "rackforge-rf-soundfonts"
 version = "0.1.0"
 dependencies = [
  "hound",
- "rackforge-dsp",
  "rackforge-plugin-api",
  "rf-soundfonts",
  "serde",

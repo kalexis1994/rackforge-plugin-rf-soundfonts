@@ -4,7 +4,7 @@ name = "RF-Soundfonts"
 vendor = "RackForge"
 version = "0.1.0"
 kind = "instrument"
-state_version = 3
+state_version = 4
 capabilities = [
     "audio_output",
     "midi_input",

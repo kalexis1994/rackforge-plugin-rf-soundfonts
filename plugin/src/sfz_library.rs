@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rf_soundfonts::Voice;
 use rf_soundfonts::sfz::instrument::{CcState, SampledInstrument};
 use rf_soundfonts::streamer::Streamer;
-use rf_soundfonts::Voice;
 
 /// Extensions identifying an instrument definition.
 ///
@@ -151,9 +151,7 @@ impl SfzLibrary {
     }
 
     pub fn index_of(&self, id: &str) -> Option<usize> {
-        self.instruments
-            .iter()
-            .position(|loaded| loaded.id == id)
+        self.instruments.iter().position(|loaded| loaded.id == id)
     }
 
     /// Total memory the loaded instruments hold resident.
@@ -262,8 +260,8 @@ fn unique_id(name: &str, seen: &mut BTreeMap<String, usize>) -> String {
 
 /// Preset identifier for an instrument, as published to the host.
 ///
-/// Kept distinguishable from the DLS and CUSTOM identifiers without naming
-/// the file format in anything a player reads: the prefix is a namespace, and
+/// Kept distinguishable from the DLS identifier without naming the file
+/// format in anything a player reads: the prefix is a namespace, and
 /// the display name comes from the instrument itself.
 pub fn preset_id(instrument_id: &str) -> String {
     format!("sfz.{instrument_id}")
@@ -328,7 +326,10 @@ mod tests {
         fs::write(root.join("readme.txt"), "not an instrument").unwrap();
         let (library, failures) = SfzLibrary::load(&root);
         assert!(library.is_empty());
-        assert!(failures.is_empty(), "a stray text file was treated as an error");
+        assert!(
+            failures.is_empty(),
+            "a stray text file was treated as an error"
+        );
     }
 
     /// Writes an instrument that loads: one region over one real sample.
@@ -358,7 +359,8 @@ mod tests {
         // The layout libraries actually ship in: a folder per library, with
         // definitions beside a samples directory. Searching only the top level
         // would find nothing here.
-        let root = std::env::temp_dir().join(format!("rf-soundfonts-nested-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("rf-soundfonts-nested-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         install(&root.join("HeadroomPiano"), "Headroom Piano");
@@ -373,7 +375,8 @@ mod tests {
 
     #[test]
     fn two_libraries_may_hold_instruments_of_the_same_name() {
-        let root = std::env::temp_dir().join(format!("rf-soundfonts-samename-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("rf-soundfonts-samename-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         install(&root.join("LibraryA"), "Piano");
@@ -391,7 +394,8 @@ mod tests {
 
     #[test]
     fn the_cache_directory_is_not_mistaken_for_a_library() {
-        let root = std::env::temp_dir().join(format!("rf-soundfonts-cachedir-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("rf-soundfonts-cachedir-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         install(&root.join("Real"), "Piano");
@@ -408,7 +412,8 @@ mod tests {
         // those live on the Pi. What matters is that the file is picked up and
         // handed to the Kontakt reader, which the error proves — an unreadable
         // header is a different complaint than never having been looked at.
-        let root = std::env::temp_dir().join(format!("rf-soundfonts-lib-nki-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("rf-soundfonts-lib-nki-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("map.nki"), b"not a kontakt file at all").unwrap();
@@ -420,7 +425,8 @@ mod tests {
 
     #[test]
     fn one_broken_instrument_does_not_hide_the_others() {
-        let root = std::env::temp_dir().join(format!("rf-soundfonts-lib-mixed-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("rf-soundfonts-lib-mixed-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("broken.sfz"), "<region> sample=missing.wav").unwrap();

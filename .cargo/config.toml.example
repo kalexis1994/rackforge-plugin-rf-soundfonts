@@ -3,7 +3,6 @@
 # ignored so release builds continue to use the pinned SDK revision.
 
 [patch."https://github.com/kalexis1994/rackforge.git"]
-rackforge-dsp = { path = "../rackforge/crates/rackforge-dsp" }
 rackforge-plugin-api = { path = "../rackforge/crates/rackforge-plugin-api" }
 rackforge-plugin-sdk = { path = "../rackforge/crates/rackforge-plugin-sdk" }
 rackforge-midi-api = { path = "../rackforge/crates/rackforge-midi-api" }

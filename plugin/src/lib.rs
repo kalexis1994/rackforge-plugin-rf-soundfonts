@@ -1,19 +1,13 @@
-mod custom_program;
-mod program_editor;
 mod sfz_library;
-use custom_program::{CustomProgram, CustomProgramPayload, DlsSource, ProgramLayer, SharedEffects};
 
-use rackforge_dsp::{Chorus, Exciter, Reverb, StereoFrame};
 use rackforge_plugin_api::abi::{
-    HostApiV1, LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_WARN, MidiEventV1,
-    PROGRAM_EXTENSION_VERSION, ParameterEventV1, PluginApiV1, ProcessBlockV1,
-    ProgramExtensionApiV1, STATUS_INVALID_ARGUMENT, STATUS_INVALID_STATE, STATUS_OK,
+    HostApiV1, LOG_LEVEL_ERROR, LOG_LEVEL_INFO, LOG_LEVEL_WARN, MidiEventV1, ParameterEventV1,
+    PluginApiV1, ProcessBlockV1, STATUS_INVALID_ARGUMENT, STATUS_INVALID_STATE, STATUS_OK,
     STATUS_UNKNOWN_PARAMETER, SURFACE_EXTENSION_VERSION, SurfaceExtensionApiV1,
     copy_to_host_buffer, pack_version, version_major, version_minor,
 };
 use rackforge_plugin_api::{
-    BankDescriptor, PreparedProgram, PresetCatalog, PresetDescriptor, ProgramDocument,
-    ProgramEditRequest, ProgramEditorView, ProgramFieldEditRequest, SurfaceActivationRequest,
+    BankDescriptor, PresetCatalog, PresetDescriptor, SurfaceActivationRequest,
     SurfaceActivationResponse,
 };
 use rf_soundfonts::{DlsBank, Voice};
@@ -41,7 +35,7 @@ const RUNTIME_DESCRIPTOR: &[u8] = br#"{
   "schema_version": 1,
   "id": "org.rackforge.rf-soundfonts",
   "version": "0.1.0",
-  "state_version": 3
+  "state_version": 4
 }"#;
 
 const PARAMETER_SCHEMA: &[u8] = br#"{
@@ -105,17 +99,9 @@ struct RfDls {
     pitch_bend_normalized: f32,
     modulation_wheel: f32,
     master_gain: f32,
-    program_gain: f32,
-    program_gain_target: f32,
-    active_layers: Vec<ProgramLayer>,
-    active_effects: SharedEffects,
-    exciter: Exciter,
-    chorus: Chorus,
-    reverb: Reverb,
     selected_bank: u32,
     selected_program: u32,
     selected_preset_id: String,
-    custom_programs: Vec<CustomProgram>,
     /// Every installed SFZ instrument, all resident. Absent when no library
     /// resource is installed.
     sfz: Option<sfz_library::SfzLibrary>,
@@ -124,13 +110,7 @@ struct RfDls {
 }
 
 impl RfDls {
-    fn new(
-        host: HostApiV1,
-        bank: DlsBank,
-        selected_bank: u32,
-        selected_program: u32,
-        custom_programs: Vec<CustomProgram>,
-    ) -> Self {
+    fn new(host: HostApiV1, bank: DlsBank, selected_bank: u32, selected_program: u32) -> Self {
         Self {
             host,
             bank,
@@ -144,24 +124,9 @@ impl RfDls {
             pitch_bend_normalized: 0.0,
             modulation_wheel: 0.0,
             master_gain: DEFAULT_MASTER_GAIN,
-            program_gain: 1.0,
-            program_gain_target: 1.0,
-            active_layers: vec![ProgramLayer::inherited(
-                "a",
-                DlsSource {
-                    resource_id: "dls-bank".into(),
-                    bank: selected_bank,
-                    program: selected_program,
-                },
-            )],
-            active_effects: SharedEffects::default(),
-            exciter: Exciter::new(48_000.0).expect("48 kHz is a supported DSP sample rate"),
-            chorus: Chorus::new(48_000.0).expect("48 kHz is a supported DSP sample rate"),
-            reverb: Reverb::new(48_000.0).expect("48 kHz is a supported DSP sample rate"),
             selected_bank,
             selected_program,
             selected_preset_id: dynamic_preset_id(selected_bank, selected_program),
-            custom_programs,
             sfz: None,
             selected_sfz: None,
         }
@@ -178,9 +143,6 @@ impl RfDls {
         self.sustain = false;
         self.pitch_bend_normalized = 0.0;
         self.modulation_wheel = 0.0;
-        self.exciter.reset();
-        self.chorus.reset();
-        self.reverb.reset();
     }
 
     fn select_instrument(&mut self, bank: u32, program: u32) -> bool {
@@ -190,118 +152,16 @@ impl RfDls {
         self.selected_bank = bank;
         self.selected_program = program;
         self.selected_preset_id = dynamic_preset_id(bank, program);
-        self.program_gain = 1.0;
-        self.program_gain_target = 1.0;
-        self.active_layers = vec![ProgramLayer::inherited(
-            "a",
-            DlsSource {
-                resource_id: "dls-bank".into(),
-                bank,
-                program,
-            },
-        )];
-        self.active_effects = SharedEffects::default();
-        self.exciter
-            .set_parameters(self.active_effects.exciter.parameters())
-            .expect("default exciter settings are valid");
-        self.chorus
-            .set_parameters(self.active_effects.chorus.parameters())
-            .expect("default chorus settings are valid");
-        self.reverb
-            .set_parameters(self.active_effects.reverb.parameters())
-            .expect("default reverb settings are valid");
         self.reset();
         true
-    }
-
-    fn select_custom(&mut self, preset_id: &str) -> bool {
-        let Some(program) = self
-            .custom_programs
-            .iter()
-            .find(|program| program.preset_id() == preset_id)
-            .cloned()
-        else {
-            return false;
-        };
-        self.apply_custom_program(program, preset_id)
-    }
-
-    fn apply_custom_program(&mut self, program: CustomProgram, preset_id: &str) -> bool {
-        self.activate_custom_program(program, preset_id, true)
-    }
-
-    fn activate_custom_program(
-        &mut self,
-        program: CustomProgram,
-        preset_id: &str,
-        reset_voices: bool,
-    ) -> bool {
-        if program.layers.iter().any(|layer| {
-            self.bank
-                .instrument(layer.source.bank, layer.source.program)
-                .is_none()
-        }) {
-            return false;
-        }
-        let Some(primary) = program.layers.iter().find(|layer| layer.enabled) else {
-            return false;
-        };
-        self.selected_bank = primary.source.bank;
-        self.selected_program = primary.source.program;
-        self.selected_preset_id = preset_id.to_owned();
-        self.program_gain_target = program.gain;
-        if reset_voices {
-            self.program_gain = program.gain;
-        }
-        if self
-            .exciter
-            .set_parameters(program.effects.exciter.parameters())
-            .is_err()
-            || self
-                .chorus
-                .set_parameters(program.effects.chorus.parameters())
-                .is_err()
-            || self
-                .reverb
-                .set_parameters(program.effects.reverb.parameters())
-                .is_err()
-        {
-            return false;
-        }
-        self.active_effects = program.effects;
-        self.active_layers = program.layers;
-        if reset_voices {
-            self.reset();
-        }
-        true
-    }
-
-    fn preview_program(&mut self, prepared: PreparedProgram) -> Result<(), String> {
-        prepared.validate().map_err(|error| error.to_string())?;
-        let canonical = self.prepare_program_save(prepared.document)?;
-        if canonical.storage_path != prepared.storage_path
-            || canonical.preview_sound_id != prepared.preview_sound_id
-        {
-            return Err("prepared RF-Soundfonts preview metadata is not canonical".into());
-        }
-        let program = CustomProgram::from_document(canonical.document)?;
-        let preset_id = format!("preview.{}", program.id);
-        if !self.activate_custom_program(program, &preset_id, false) {
-            return Err("RF-Soundfonts could not activate the prepared preview".into());
-        }
-        Ok(())
     }
 
     fn select_preset(&mut self, preset_id: &str) -> bool {
         if let Some(id) = sfz_library::instrument_id(preset_id) {
             return self.select_sfz(id, preset_id);
         }
-        // Leaving an SFZ instrument returns the plugin to the DLS path, whose
-        // layers the SFZ instruments never used.
+        // Leaving an SFZ instrument returns the plugin to the DLS path.
         self.selected_sfz = None;
-        if preset_id.starts_with("custom.") {
-            return self.select_custom(preset_id);
-        }
         let selection = if preset_id == PIANO_PRESET_ID {
             Some((0, 0))
         } else {
@@ -325,16 +185,16 @@ impl RfDls {
         };
         self.selected_sfz = Some(index);
         self.selected_preset_id = preset_id.to_owned();
-        // Layers belong to the DLS side. An SFZ instrument carries its own
-        // regions and must not inherit a split left over from another sound.
-        self.active_layers.clear();
         self.reset();
         true
     }
 
     fn has_preset(&self, preset_id: &str) -> bool {
-        if let Some(id) = preset_id.strip_prefix("custom.") {
-            return self.custom_programs.iter().any(|program| program.id == id);
+        if let Some(id) = sfz_library::instrument_id(preset_id) {
+            return self
+                .sfz
+                .as_ref()
+                .is_some_and(|library| library.index_of(id).is_some());
         }
         let selection = if preset_id == PIANO_PRESET_ID {
             Some((0, 0))
@@ -353,116 +213,6 @@ impl RfDls {
             .selected_item_id
             .filter(|preset_id| self.has_preset(preset_id));
         Ok(SurfaceActivationResponse::focus(focus))
-    }
-
-    fn begin_program_edit(&self, request: &ProgramEditRequest) -> Result<PreparedProgram, String> {
-        request.validate().map_err(|error| error.to_string())?;
-        if let Some(program_id) = &request.program_id {
-            let id = program_id.strip_prefix("custom.").unwrap_or(program_id);
-            let program = self
-                .custom_programs
-                .iter()
-                .find(|program| program.id == id)
-                .ok_or_else(|| format!("unknown CUSTOM program {program_id:?}"))?;
-            return program.prepared();
-        }
-
-        let slot = (1..=999)
-            .find(|slot| {
-                self.custom_programs
-                    .iter()
-                    .all(|program| program.slot != *slot)
-            })
-            .ok_or_else(|| "RF-Soundfonts has no free CUSTOM slots".to_owned())?;
-        let source = self
-            .bank
-            .instruments
-            .iter()
-            .filter(|instrument| !instrument.is_drum())
-            .min_by_key(|instrument| (instrument.bank, instrument.program))
-            .or_else(|| self.bank.instruments.first())
-            .ok_or_else(|| "DLS bank contains no source instruments".to_owned())?;
-        CustomProgram {
-            id: format!("user.custom-{slot:03}"),
-            name: format!("CUSTOM {slot:03}"),
-            category: None,
-            slot,
-            gain: 1.0,
-            layers: vec![ProgramLayer::inherited(
-                "a",
-                DlsSource {
-                    resource_id: "dls-bank".into(),
-                    bank: source.bank,
-                    program: source.program,
-                },
-            )],
-            effects: SharedEffects::default(),
-        }
-        .prepared()
-    }
-
-    fn prepare_program_save(&self, document: ProgramDocument) -> Result<PreparedProgram, String> {
-        let program = CustomProgram::from_document(document)?;
-        for layer in &program.layers {
-            if self
-                .bank
-                .instrument(layer.source.bank, layer.source.program)
-                .is_none()
-            {
-                return Err(format!(
-                    "DLS bank does not contain layer {:?} source bank={} program={}",
-                    layer.id, layer.source.bank, layer.source.program
-                ));
-            }
-        }
-        if self
-            .custom_programs
-            .iter()
-            .any(|candidate| candidate.id != program.id && candidate.slot == program.slot)
-        {
-            return Err(format!("CUSTOM slot {} is already in use", program.slot));
-        }
-        program.prepared()
-    }
-
-    fn program_editor_view(&self, document: ProgramDocument) -> Result<ProgramEditorView, String> {
-        let program = CustomProgram::from_document(document)?;
-        let view = program_editor::view(&program);
-        view.validate().map_err(|error| error.to_string())?;
-        Ok(view)
-    }
-
-    fn apply_program_edit(
-        &self,
-        request: ProgramFieldEditRequest,
-    ) -> Result<PreparedProgram, String> {
-        request.validate().map_err(|error| error.to_string())?;
-        let mut program = CustomProgram::from_document(request.document)?;
-        program_editor::apply(&mut program, &request.field_id, request.value)?;
-        self.prepare_program_save(program.to_document()?)
-    }
-
-    fn install_program(&mut self, prepared: PreparedProgram) -> Result<(), String> {
-        prepared.validate().map_err(|error| error.to_string())?;
-        let canonical = self.prepare_program_save(prepared.document)?;
-        if canonical.storage_path != prepared.storage_path
-            || canonical.preview_sound_id != prepared.preview_sound_id
-        {
-            return Err("prepared RF-Soundfonts program metadata is not canonical".into());
-        }
-        let program = CustomProgram::from_document(canonical.document)?;
-        if let Some(current) = self
-            .custom_programs
-            .iter_mut()
-            .find(|current| current.id == program.id)
-        {
-            *current = program;
-        } else {
-            self.custom_programs.push(program);
-        }
-        self.custom_programs
-            .sort_by_key(|program| (program.slot, program.id.clone()));
-        publish_dynamic_catalog(&self.host, &self.bank, &self.custom_programs, self.sfz.as_ref())
     }
 
     fn set_parameter(&mut self, index: u32, value: f64) -> i32 {
@@ -495,8 +245,7 @@ impl RfDls {
         }
         if let Some(index) = self.selected_sfz {
             // An SFZ instrument resolves its own regions, levels and stereo
-            // placement from controller state, so it bypasses the layer and
-            // program machinery entirely rather than being squeezed into it.
+            // placement from controller state.
             if let Some(library) = self.sfz.as_ref() {
                 for voice in library.voices_for_note(index, note, velocity, self.sample_rate) {
                     if self.voices.len() >= MAX_VOICES {
@@ -508,29 +257,17 @@ impl RfDls {
             return;
         }
         let bank = &self.bank;
-        for layer in &self.active_layers {
-            if !layer.accepts(note, velocity) {
-                continue;
-            }
-            let Some(instrument) = bank.instrument(layer.source.bank, layer.source.program) else {
-                continue;
-            };
-            let config = layer.voice_config(instrument);
-            for region in instrument.matching_regions(note, velocity) {
-                if let Ok(voice) = Voice::new_with_config(
-                    bank,
-                    instrument,
-                    region,
-                    note,
-                    velocity,
-                    self.sample_rate,
-                    config,
-                ) {
-                    if self.voices.len() >= MAX_VOICES {
-                        self.voices.remove(0);
-                    }
-                    self.voices.push(voice);
+        let Some(instrument) = bank.instrument(self.selected_bank, self.selected_program) else {
+            return;
+        };
+        for region in instrument.matching_regions(note, velocity) {
+            if let Ok(voice) =
+                Voice::new(bank, instrument, region, note, velocity, self.sample_rate)
+            {
+                if self.voices.len() >= MAX_VOICES {
+                    self.voices.remove(0);
                 }
+                self.voices.push(voice);
             }
         }
     }
@@ -637,8 +374,7 @@ impl RfDls {
     /// channels the whole way. Collapsing to mono here and widening again
     /// downstream would discard both the panning and the natural width of a
     /// stereo sample.
-    fn render_frame(&mut self) -> StereoFrame {
-        self.program_gain += (self.program_gain_target - self.program_gain) * 0.005;
+    fn render_frame(&mut self) -> [f32; 2] {
         let mut left = 0.0_f32;
         let mut right = 0.0_f32;
         let mut index = 0;
@@ -653,8 +389,7 @@ impl RfDls {
                 index += 1;
             }
         }
-        let gain = self.master_gain * self.program_gain;
-        StereoFrame::new(left * gain, right * gain)
+        [left * self.master_gain, right * self.master_gain]
     }
 }
 
@@ -682,11 +417,7 @@ fn parse_dynamic_preset_id(id: &str) -> Option<(u32, u32)> {
     ))
 }
 
-fn dynamic_catalog(
-    bank: &DlsBank,
-    custom_programs: &[CustomProgram],
-    sfz: Option<&sfz_library::SfzLibrary>,
-) -> PresetCatalog {
+fn dynamic_catalog(bank: &DlsBank, sfz: Option<&sfz_library::SfzLibrary>) -> PresetCatalog {
     let mut seen = BTreeSet::new();
     let mut presets = Vec::new();
     let mut instruments = bank.instruments.iter().collect::<Vec<_>>();
@@ -729,21 +460,8 @@ fn dynamic_catalog(
             editable: false,
         });
     }
-    for program in custom_programs {
-        presets.push(PresetDescriptor {
-            id: program.preset_id(),
-            name: program.name.clone(),
-            description: Some(format!("CUSTOM {:03}", program.slot)),
-            bank: Some("custom".into()),
-            category: program.category.clone(),
-            order: i32::from(program.slot),
-            tags: vec!["custom".into()],
-            editable: true,
-        });
-    }
     // Only banks with something in them are published. An installation driven
-    // by SFZ alone should not make the player scroll past an empty DLS bank
-    // and an empty CUSTOM bank to reach the instrument they installed.
+    // by SFZ alone should reach the installed libraries immediately.
     let mut banks = Vec::new();
     if !bank.instruments.is_empty() {
         banks.push(BankDescriptor {
@@ -752,14 +470,6 @@ fn dynamic_catalog(
             order: 0,
         });
     }
-    if !custom_programs.is_empty() {
-        banks.push(BankDescriptor {
-            id: "custom".into(),
-            name: "CUSTOM".into(),
-            order: 1,
-        });
-    }
-
     // One bank per installed library, so a player picks the library first and
     // the instrument second. With twenty instruments a single flat list is
     // unusable on a two-line controller display, and the grouping matches how
@@ -769,7 +479,7 @@ fn dynamic_catalog(
             banks.push(BankDescriptor {
                 id: sfz_bank_id(name),
                 name: (*name).to_string(),
-                order: 2 + offset as i32,
+                order: 1 + offset as i32,
             });
         }
         for (offset, loaded) in library.instruments().iter().enumerate() {
@@ -829,7 +539,10 @@ mod fact_tests {
         // Ten trumpets all answer to the whole keyboard because their
         // outermost regions were stretched to cover it. What tells them apart
         // is where they were actually played.
-        assert_eq!(describe(&summary()), "A0–C8 · 807 zones · 4 layers · 67 MiB");
+        assert_eq!(
+            describe(&summary()),
+            "A0–C8 · 807 zones · 4 layers · 67 MiB"
+        );
     }
 
     #[test]
@@ -873,14 +586,16 @@ mod bank_id_tests {
 
     #[test]
     fn punctuation_becomes_a_single_separator() {
-        assert_eq!(sfz_bank_id("Virtual Playing  Orchestra"), "virtual-playing-orchestra");
+        assert_eq!(
+            sfz_bank_id("Virtual Playing  Orchestra"),
+            "virtual-playing-orchestra"
+        );
         assert_eq!(sfz_bank_id("VSCO-2 CE"), "vsco-2-ce");
     }
 
     #[test]
     fn a_library_cannot_take_over_a_bank_this_plugin_owns() {
         assert_ne!(sfz_bank_id("DLS"), "dls");
-        assert_ne!(sfz_bank_id("custom"), "custom");
     }
 
     #[test]
@@ -974,7 +689,7 @@ fn sfz_bank_id(library: &str) -> String {
     if id.is_empty() {
         id.push_str("library");
     }
-    if id == "dls" || id == "custom" {
+    if id == "dls" {
         id.push_str("-library");
     }
     id
@@ -983,7 +698,6 @@ fn sfz_bank_id(library: &str) -> String {
 fn publish_dynamic_catalog(
     host: &HostApiV1,
     bank: &DlsBank,
-    custom_programs: &[CustomProgram],
     sfz: Option<&sfz_library::SfzLibrary>,
 ) -> Result<(), String> {
     if version_major(host.api_version) != 1
@@ -995,8 +709,8 @@ fn publish_dynamic_catalog(
     let callback = host
         .publish_preset_catalog
         .ok_or_else(|| "host dynamic preset callback is unavailable".to_owned())?;
-    let bytes = serde_json::to_vec(&dynamic_catalog(bank, custom_programs, sfz))
-        .map_err(|error| error.to_string())?;
+    let bytes =
+        serde_json::to_vec(&dynamic_catalog(bank, sfz)).map_err(|error| error.to_string())?;
     // SAFETY: bytes remain readable for the callback duration.
     let status = unsafe { callback(host.context, bytes.as_ptr(), bytes.len()) };
     if status != STATUS_OK {
@@ -1063,34 +777,6 @@ fn named_resource_path(host: &HostApiV1, resource: &[u8]) -> Result<PathBuf, Str
     Ok(PathBuf::from(text))
 }
 
-fn plugin_data_path(host: &HostApiV1) -> Result<Option<PathBuf>, String> {
-    if version_major(host.api_version) != 1 || version_minor(host.api_version) < 2 {
-        return Ok(None);
-    }
-    if host.struct_size < size_of::<HostApiV1>() as u32 {
-        return Err("host API 1.2 table is truncated".into());
-    }
-    let Some(callback) = host.get_plugin_data_path else {
-        return Ok(None);
-    };
-    // SAFETY: a null destination queries the required path size.
-    let required = unsafe { callback(host.context, ptr::null_mut(), 0) };
-    if required == 0 {
-        return Ok(None);
-    }
-    if required > 32 * 1024 {
-        return Err("plugin data path is unreasonably large".into());
-    }
-    let mut bytes = vec![0_u8; required];
-    // SAFETY: bytes is writable for exactly the reported size.
-    let reported = unsafe { callback(host.context, bytes.as_mut_ptr(), bytes.len()) };
-    if reported != required {
-        return Err("plugin data path changed while being read".into());
-    }
-    let text = String::from_utf8(bytes).map_err(|_| "plugin data path is not UTF-8".to_owned())?;
-    Ok(Some(PathBuf::from(text)))
-}
-
 unsafe extern "C" fn write_runtime_descriptor(destination: *mut u8, capacity: usize) -> usize {
     unsafe { copy_to_host_buffer(RUNTIME_DESCRIPTOR, destination, capacity) }
 }
@@ -1127,66 +813,27 @@ unsafe extern "C" fn create(host: *const HostApiV1) -> *mut c_void {
             }
         }
     };
-    let result = Ok::<DlsBank, String>(bank)
-        .and_then(|bank| plugin_data_path(host).map(|data_root| (bank, data_root)))
-        .and_then(|(bank, data_root)| {
-            let (mut custom_programs, warnings) =
-                custom_program::load_programs(data_root.as_deref())?;
-            for warning in warnings {
-                log_host(host, LOG_LEVEL_WARN, &warning);
-            }
-            custom_programs.retain(|program| {
-                let missing = program.layers.iter().find(|layer| {
-                    bank.instrument(layer.source.bank, layer.source.program)
-                        .is_none()
-                });
-                if let Some(layer) = missing {
-                    log_host(
-                        host,
-                        LOG_LEVEL_WARN,
-                        &format!(
-                            "ignoring CUSTOM {:?}: layer {:?} DLS bank {} program {} is missing",
-                            program.id, layer.id, layer.source.bank, layer.source.program
-                        ),
-                    );
-                    false
-                } else {
-                    true
-                }
-            });
-            let default = bank
-                .instrument(0, 0)
-                .or_else(|| {
-                    bank.instruments
-                        .iter()
-                        .find(|instrument| !instrument.is_drum())
-                })
-                .or_else(|| bank.instruments.first())
-                .map(|instrument| (instrument.bank, instrument.program))
-                // An empty bank leaves the selection pointing at nothing,
-                // which is correct: an SFZ preset will replace it, and until
-                // one is chosen the plugin simply has no sound to make.
-                .unwrap_or((0, 0));
-            publish_dynamic_catalog(host, &bank, &custom_programs, None)?;
-            Ok((bank, default, custom_programs))
-        });
+    let result = Ok::<DlsBank, String>(bank).and_then(|bank| {
+        let default = bank
+            .instrument(0, 0)
+            .or_else(|| {
+                bank.instruments
+                    .iter()
+                    .find(|instrument| !instrument.is_drum())
+            })
+            .or_else(|| bank.instruments.first())
+            .map(|instrument| (instrument.bank, instrument.program))
+            // An empty bank leaves the selection pointing at nothing,
+            // which is correct: an SFZ preset will replace it, and until
+            // one is chosen the plugin simply has no sound to make.
+            .unwrap_or((0, 0));
+        publish_dynamic_catalog(host, &bank, None)?;
+        Ok((bank, default))
+    });
     match result {
-        Ok((bank, (selected_bank, selected_program), custom_programs)) => {
-            log_host(
-                host,
-                LOG_LEVEL_INFO,
-                &format!(
-                    "RF-Soundfonts bank loaded with {} CUSTOM programs",
-                    custom_programs.len()
-                ),
-            );
-            let mut plugin = RfDls::new(
-                *host,
-                bank,
-                selected_bank,
-                selected_program,
-                custom_programs,
-            );
+        Ok((bank, (selected_bank, selected_program))) => {
+            log_host(host, LOG_LEVEL_INFO, "RF-Soundfonts libraries loaded");
+            let mut plugin = RfDls::new(*host, bank, selected_bank, selected_program);
             // Loaded after the DLS bank so a library that fails to read leaves
             // a working instrument rather than no instrument at all.
             if let Ok(root) = named_resource_path(host, SFZ_RESOURCE_ID) {
@@ -1206,12 +853,7 @@ unsafe extern "C" fn create(host: *const HostApiV1) -> *mut c_void {
                         ),
                     );
                     plugin.attach_sfz(library);
-                    let _ = publish_dynamic_catalog(
-                        host,
-                        &plugin.bank,
-                        &plugin.custom_programs,
-                        plugin.sfz.as_ref(),
-                    );
+                    let _ = publish_dynamic_catalog(host, &plugin.bank, plugin.sfz.as_ref());
                 }
             }
             Box::into_raw(Box::new(plugin)).cast()
@@ -1254,36 +896,6 @@ unsafe extern "C" fn activate(
     plugin.sample_rate = sample_rate.round() as u32;
     plugin.maximum_frames = maximum_frames;
     plugin.output_channels = output_channels;
-    let Ok(mut exciter) = Exciter::new(sample_rate as f32) else {
-        return STATUS_INVALID_ARGUMENT;
-    };
-    if exciter
-        .set_parameters(plugin.active_effects.exciter.parameters())
-        .is_err()
-    {
-        return STATUS_INVALID_STATE;
-    }
-    let Ok(mut chorus) = Chorus::new(sample_rate as f32) else {
-        return STATUS_INVALID_ARGUMENT;
-    };
-    if chorus
-        .set_parameters(plugin.active_effects.chorus.parameters())
-        .is_err()
-    {
-        return STATUS_INVALID_STATE;
-    }
-    let Ok(mut reverb) = Reverb::new(sample_rate as f32) else {
-        return STATUS_INVALID_ARGUMENT;
-    };
-    if reverb
-        .set_parameters(plugin.active_effects.reverb.parameters())
-        .is_err()
-    {
-        return STATUS_INVALID_STATE;
-    }
-    plugin.exciter = exciter;
-    plugin.chorus = chorus;
-    plugin.reverb = reverb;
     plugin.active = true;
     plugin.reset();
     STATUS_OK
@@ -1332,28 +944,46 @@ unsafe extern "C" fn get_parameter(
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct SavedStateV4 {
+    schema_version: u32,
+    master_gain: f32,
+    selected_preset_id: String,
+}
+
+#[derive(Deserialize)]
 struct SavedStateV3 {
     schema_version: u32,
     master_gain: f32,
     selected_preset_id: String,
-    active_program: CustomProgramPayload,
+    active_program: LegacyProgramState,
+}
+
+#[derive(Deserialize)]
+struct LegacyProgramState {
+    layers: Vec<LegacyLayerState>,
+}
+
+#[derive(Deserialize)]
+struct LegacyLayerState {
+    enabled: bool,
+    source: LegacySourceState,
+}
+
+#[derive(Deserialize)]
+struct LegacySourceState {
+    bank: u32,
+    program: u32,
 }
 
 fn state_bytes(plugin: &RfDls) -> Vec<u8> {
-    let snapshot = SavedStateV3 {
-        schema_version: 3,
+    let snapshot = SavedStateV4 {
+        schema_version: 4,
         master_gain: plugin.master_gain,
         selected_preset_id: plugin.selected_preset_id.clone(),
-        active_program: CustomProgramPayload {
-            slot: 1,
-            gain: plugin.program_gain_target,
-            layers: plugin.active_layers.clone(),
-            effects: plugin.active_effects,
-        },
     };
     let payload = serde_json::to_vec(&snapshot).expect("validated RF-Soundfonts state serializes");
     let mut state = Vec::with_capacity(4 + payload.len());
-    state.extend_from_slice(b"RFD3");
+    state.extend_from_slice(b"RFD4");
     state.extend_from_slice(&payload);
     state
 }
@@ -1378,6 +1008,27 @@ unsafe extern "C" fn load_state(instance: *mut c_void, source: *const u8, length
         return STATUS_INVALID_ARGUMENT;
     }
     let bytes = unsafe { slice::from_raw_parts(source, length) };
+    if &bytes[..4] == b"RFD4" {
+        let Ok(snapshot) = serde_json::from_slice::<SavedStateV4>(&bytes[4..]) else {
+            return STATUS_INVALID_ARGUMENT;
+        };
+        if snapshot.schema_version != 4
+            || snapshot.selected_preset_id.is_empty()
+            || snapshot.selected_preset_id.len() > 256
+            || !plugin.has_preset(&snapshot.selected_preset_id)
+        {
+            return STATUS_INVALID_STATE;
+        }
+        let status = plugin.set_parameter(MASTER_GAIN_PARAMETER, f64::from(snapshot.master_gain));
+        if status != STATUS_OK {
+            return status;
+        }
+        return if plugin.select_preset(&snapshot.selected_preset_id) {
+            STATUS_OK
+        } else {
+            STATUS_INVALID_STATE
+        };
+    }
     if &bytes[..4] == b"RFD3" {
         let Ok(snapshot) = serde_json::from_slice::<SavedStateV3>(&bytes[4..]) else {
             return STATUS_INVALID_ARGUMENT;
@@ -1388,34 +1039,30 @@ unsafe extern "C" fn load_state(instance: *mut c_void, source: *const u8, length
         {
             return STATUS_INVALID_STATE;
         }
-        let program = CustomProgram {
-            id: "restored-state".into(),
-            name: "Restored state".into(),
-            category: None,
-            slot: snapshot.active_program.slot,
-            gain: snapshot.active_program.gain,
-            layers: snapshot.active_program.layers,
-            effects: snapshot.active_program.effects,
-        };
-        if program.validate().is_err() {
-            return STATUS_INVALID_STATE;
-        }
-        if program.layers.iter().any(|layer| {
-            plugin
-                .bank
-                .instrument(layer.source.bank, layer.source.program)
-                .is_none()
-        }) {
-            return STATUS_INVALID_STATE;
-        }
         let status = plugin.set_parameter(MASTER_GAIN_PARAMETER, f64::from(snapshot.master_gain));
         if status != STATUS_OK {
             return status;
         }
-        if !plugin.activate_custom_program(program, &snapshot.selected_preset_id, true) {
-            return STATUS_INVALID_STATE;
+        if plugin.has_preset(&snapshot.selected_preset_id) {
+            return if plugin.select_preset(&snapshot.selected_preset_id) {
+                STATUS_OK
+            } else {
+                STATUS_INVALID_STATE
+            };
         }
-        return STATUS_OK;
+        let Some(primary) = snapshot
+            .active_program
+            .layers
+            .into_iter()
+            .find(|layer| layer.enabled)
+        else {
+            return STATUS_INVALID_STATE;
+        };
+        return if plugin.select_instrument(primary.source.bank, primary.source.program) {
+            STATUS_OK
+        } else {
+            STATUS_INVALID_STATE
+        };
     }
     let (gain, selected) = if &bytes[..4] == b"RFD1" && length == LEGACY_STATE_SIZE {
         let gain = f32::from_le_bytes(bytes[4..8].try_into().expect("fixed slice"));
@@ -1524,21 +1171,18 @@ unsafe extern "C" fn process(instance: *mut c_void, block: *const ProcessBlockV1
             plugin.handle_midi(midi[midi_index]);
             midi_index += 1;
         }
-        let mixed = plugin.render_frame();
-        let excited = plugin.exciter.process(mixed);
-        let chorused = plugin.chorus.process(excited);
-        let processed = plugin.reverb.process(chorused);
+        let [left, right] = plugin.render_frame();
         let start = frame as usize * block.output_channels as usize;
         output[start] = if block.output_channels == 1 {
-            processed.mono()
+            (left + right) * 0.5
         } else {
-            processed.left
+            left
         };
         if block.output_channels > 1 {
-            output[start + 1] = processed.right;
+            output[start + 1] = right;
         }
         for channel in 2..block.output_channels as usize {
-            output[start + channel] = processed.mono();
+            output[start + channel] = (left + right) * 0.5;
         }
     }
     STATUS_OK
@@ -1568,156 +1212,6 @@ where
         return Err(());
     }
     Ok(events)
-}
-
-unsafe extern "C" fn begin_program_edit_json(
-    instance: *mut c_void,
-    source: *const u8,
-    source_length: usize,
-    destination: *mut u8,
-    capacity: usize,
-) -> usize {
-    let Some(plugin) = (unsafe { instance.cast::<RfDls>().as_ref() }) else {
-        return 0;
-    };
-    let Some(bytes) = (unsafe { read_extension_source(source, source_length) }) else {
-        return 0;
-    };
-    let prepared = serde_json::from_slice::<ProgramEditRequest>(bytes)
-        .map_err(|error| error.to_string())
-        .and_then(|request| plugin.begin_program_edit(&request))
-        .and_then(|prepared| serde_json::to_vec(&prepared).map_err(|error| error.to_string()));
-    match prepared {
-        Ok(bytes) => unsafe { copy_to_host_buffer(&bytes, destination, capacity) },
-        Err(error) => {
-            log_host(&plugin.host, LOG_LEVEL_WARN, &error);
-            0
-        }
-    }
-}
-
-unsafe extern "C" fn prepare_program_save_json(
-    instance: *mut c_void,
-    source: *const u8,
-    source_length: usize,
-    destination: *mut u8,
-    capacity: usize,
-) -> usize {
-    let Some(plugin) = (unsafe { instance.cast::<RfDls>().as_ref() }) else {
-        return 0;
-    };
-    let Some(bytes) = (unsafe { read_extension_source(source, source_length) }) else {
-        return 0;
-    };
-    let prepared = serde_json::from_slice::<ProgramDocument>(bytes)
-        .map_err(|error| error.to_string())
-        .and_then(|document| plugin.prepare_program_save(document))
-        .and_then(|prepared| serde_json::to_vec(&prepared).map_err(|error| error.to_string()));
-    match prepared {
-        Ok(bytes) => unsafe { copy_to_host_buffer(&bytes, destination, capacity) },
-        Err(error) => {
-            log_host(&plugin.host, LOG_LEVEL_WARN, &error);
-            0
-        }
-    }
-}
-
-unsafe extern "C" fn program_editor_view_json(
-    instance: *mut c_void,
-    source: *const u8,
-    source_length: usize,
-    destination: *mut u8,
-    capacity: usize,
-) -> usize {
-    let Some(plugin) = (unsafe { instance.cast::<RfDls>().as_ref() }) else {
-        return 0;
-    };
-    let Some(bytes) = (unsafe { read_extension_source(source, source_length) }) else {
-        return 0;
-    };
-    let view = serde_json::from_slice::<ProgramDocument>(bytes)
-        .map_err(|error| error.to_string())
-        .and_then(|document| plugin.program_editor_view(document))
-        .and_then(|view| serde_json::to_vec(&view).map_err(|error| error.to_string()));
-    match view {
-        Ok(bytes) => unsafe { copy_to_host_buffer(&bytes, destination, capacity) },
-        Err(error) => {
-            log_host(&plugin.host, LOG_LEVEL_WARN, &error);
-            0
-        }
-    }
-}
-
-unsafe extern "C" fn apply_program_edit_json(
-    instance: *mut c_void,
-    source: *const u8,
-    source_length: usize,
-    destination: *mut u8,
-    capacity: usize,
-) -> usize {
-    let Some(plugin) = (unsafe { instance.cast::<RfDls>().as_ref() }) else {
-        return 0;
-    };
-    let Some(bytes) = (unsafe { read_extension_source(source, source_length) }) else {
-        return 0;
-    };
-    let prepared = serde_json::from_slice::<ProgramFieldEditRequest>(bytes)
-        .map_err(|error| error.to_string())
-        .and_then(|request| plugin.apply_program_edit(request))
-        .and_then(|prepared| serde_json::to_vec(&prepared).map_err(|error| error.to_string()));
-    match prepared {
-        Ok(bytes) => unsafe { copy_to_host_buffer(&bytes, destination, capacity) },
-        Err(error) => {
-            log_host(&plugin.host, LOG_LEVEL_WARN, &error);
-            0
-        }
-    }
-}
-
-unsafe extern "C" fn install_program_json(
-    instance: *mut c_void,
-    source: *const u8,
-    source_length: usize,
-) -> i32 {
-    let Some(plugin) = (unsafe { instance.cast::<RfDls>().as_mut() }) else {
-        return STATUS_INVALID_ARGUMENT;
-    };
-    let Some(bytes) = (unsafe { read_extension_source(source, source_length) }) else {
-        return STATUS_INVALID_ARGUMENT;
-    };
-    match serde_json::from_slice::<PreparedProgram>(bytes)
-        .map_err(|error| error.to_string())
-        .and_then(|prepared| plugin.install_program(prepared))
-    {
-        Ok(()) => STATUS_OK,
-        Err(error) => {
-            log_host(&plugin.host, LOG_LEVEL_WARN, &error);
-            STATUS_INVALID_ARGUMENT
-        }
-    }
-}
-
-unsafe extern "C" fn preview_program_json(
-    instance: *mut c_void,
-    source: *const u8,
-    source_length: usize,
-) -> i32 {
-    let Some(plugin) = (unsafe { instance.cast::<RfDls>().as_mut() }) else {
-        return STATUS_INVALID_ARGUMENT;
-    };
-    let Some(bytes) = (unsafe { read_extension_source(source, source_length) }) else {
-        return STATUS_INVALID_ARGUMENT;
-    };
-    match serde_json::from_slice::<PreparedProgram>(bytes)
-        .map_err(|error| error.to_string())
-        .and_then(|prepared| plugin.preview_program(prepared))
-    {
-        Ok(()) => STATUS_OK,
-        Err(error) => {
-            log_host(&plugin.host, LOG_LEVEL_WARN, &error);
-            STATUS_INVALID_ARGUMENT
-        }
-    }
 }
 
 unsafe extern "C" fn activate_surface_json(
@@ -1772,17 +1266,6 @@ static PLUGIN_API: PluginApiV1 = PluginApiV1 {
     process,
 };
 
-static PROGRAM_EXTENSION_API: ProgramExtensionApiV1 = ProgramExtensionApiV1 {
-    struct_size: size_of::<ProgramExtensionApiV1>() as u32,
-    api_version: PROGRAM_EXTENSION_VERSION,
-    begin_edit: begin_program_edit_json,
-    prepare_save: prepare_program_save_json,
-    install: install_program_json,
-    preview: Some(preview_program_json),
-    editor_view: Some(program_editor_view_json),
-    apply_edit: Some(apply_program_edit_json),
-};
-
 static SURFACE_EXTENSION_API: SurfaceExtensionApiV1 = SurfaceExtensionApiV1 {
     struct_size: size_of::<SurfaceExtensionApiV1>() as u32,
     api_version: SURFACE_EXTENSION_VERSION,
@@ -1792,11 +1275,6 @@ static SURFACE_EXTENSION_API: SurfaceExtensionApiV1 = SurfaceExtensionApiV1 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rackforge_plugin_entry_v1() -> *const PluginApiV1 {
     ptr::addr_of!(PLUGIN_API)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rackforge_program_extension_entry_v1() -> *const ProgramExtensionApiV1 {
-    ptr::addr_of!(PROGRAM_EXTENSION_API)
 }
 
 #[unsafe(no_mangle)]
@@ -1813,14 +1291,6 @@ mod tests {
         Wave,
     };
     use std::sync::Arc;
-
-    fn custom_program() -> CustomProgram {
-        let document = serde_json::from_slice(include_bytes!(
-            "../examples/custom.warm-piano.rackforge-program.json"
-        ))
-        .unwrap();
-        CustomProgram::from_document(document).unwrap()
-    }
 
     fn synthetic_plugin() -> RfDls {
         let samples = (0..512)
@@ -1867,39 +1337,38 @@ mod tests {
             },
             0,
             0,
-            Vec::new(),
         )
     }
 
     #[test]
-    fn surface_activation_only_focuses_existing_programs() {
-        let mut plugin = synthetic_plugin();
-        plugin.custom_programs.push(custom_program());
-        let response = plugin
+    fn surface_activation_focuses_only_library_instruments() {
+        let plugin = synthetic_plugin();
+        let existing = plugin
+            .activate_surface(SurfaceActivationRequest::return_to(
+                "little@1",
+                SurfaceMode::Play,
+                Some("dls.b00000000.p00000000".into()),
+            ))
+            .unwrap();
+        assert_eq!(
+            existing.focus_item_id.as_deref(),
+            Some("dls.b00000000.p00000000")
+        );
+        let removed_custom = plugin
             .activate_surface(SurfaceActivationRequest::return_to(
                 "little@1",
                 SurfaceMode::Play,
                 Some("custom.user.warm-piano".into()),
             ))
             .unwrap();
-        assert_eq!(
-            response.focus_item_id.as_deref(),
-            Some("custom.user.warm-piano")
-        );
-        let response = plugin
-            .activate_surface(SurfaceActivationRequest::return_to(
-                "little@1",
-                SurfaceMode::Play,
-                Some("custom.missing".into()),
-            ))
-            .unwrap();
-        assert_eq!(response.focus_item_id, None);
+        assert_eq!(removed_custom.focus_item_id, None);
     }
 
     #[test]
     fn exports_valid_metadata() {
         let descriptor: RuntimeDescriptor = serde_json::from_slice(RUNTIME_DESCRIPTOR).unwrap();
         assert_eq!(descriptor.id, "org.rackforge.rf-soundfonts");
+        assert_eq!(descriptor.state_version, 4);
         let parameters: ParameterSchema = serde_json::from_slice(PARAMETER_SCHEMA).unwrap();
         assert_eq!(parameters.validate(), Ok(()));
         let presets: PresetCatalog = serde_json::from_slice(PRESET_CATALOG).unwrap();
@@ -1907,348 +1376,51 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_catalog_uses_opaque_stable_ids() {
+    fn dynamic_catalog_contains_only_library_sounds() {
         let plugin = synthetic_plugin();
-        let catalog = dynamic_catalog(&plugin.bank, &[], plugin.sfz.as_ref());
+        let catalog = dynamic_catalog(&plugin.bank, plugin.sfz.as_ref());
         assert_eq!(catalog.validate(), Ok(()));
+        assert_eq!(catalog.banks.len(), 1);
+        assert_eq!(catalog.banks[0].id, "dls");
         assert_eq!(catalog.presets.len(), 1);
         assert_eq!(catalog.presets[0].id, "dls.b00000000.p00000000");
-        assert_eq!(catalog.presets[0].description.as_deref(), Some("B000 P000"));
-        assert_eq!(
-            parse_dynamic_preset_id(&catalog.presets[0].id),
-            Some((0, 0))
-        );
-    }
-
-    #[test]
-    fn custom_programs_are_separate_and_survive_state_round_trip() {
-        let mut plugin = synthetic_plugin();
-        plugin.custom_programs.push(custom_program());
-        let catalog = dynamic_catalog(&plugin.bank, &plugin.custom_programs, plugin.sfz.as_ref());
-        assert_eq!(catalog.validate(), Ok(()));
-        assert_eq!(catalog.banks[0].name, "DLS");
-        assert_eq!(catalog.banks[1].name, "CUSTOM");
-        assert_eq!(catalog.presets[1].id, "custom.user.warm-piano");
-        assert_eq!(catalog.presets[1].bank.as_deref(), Some("custom"));
-
-        assert!(plugin.select_custom("custom.user.warm-piano"));
-        let state = state_bytes(&plugin);
-        assert!(plugin.select_instrument(0, 0));
-        let status = unsafe {
-            load_state(
-                (&mut plugin as *mut RfDls).cast(),
-                state.as_ptr(),
-                state.len(),
-            )
-        };
-        assert_eq!(status, STATUS_OK);
-        assert_eq!(plugin.selected_preset_id, "custom.user.warm-piano");
-        let instrument = plugin.bank.instrument(0, 0).unwrap();
-        assert_eq!(
-            plugin.active_layers[0]
-                .voice_config(instrument)
-                .amplitude_envelope
-                .release_seconds,
-            1.2
-        );
-    }
-
-    #[test]
-    fn program_extension_creates_and_reopens_canonical_drafts() {
-        let mut plugin = synthetic_plugin();
-        let created = plugin
-            .begin_program_edit(&ProgramEditRequest::new(None))
-            .unwrap();
-        assert_eq!(created.document.id, "user.custom-001");
-        assert_eq!(created.document.name, "CUSTOM 001");
-        assert_eq!(
-            created.storage_path,
-            "custom/user.custom-001.rackforge-program.json"
-        );
-        assert_eq!(
-            plugin
-                .prepare_program_save(created.document.clone())
-                .unwrap(),
-            created
-        );
-
-        plugin.custom_programs.push(custom_program());
-        let reopened = plugin
-            .begin_program_edit(&ProgramEditRequest::new(Some(
-                "custom.user.warm-piano".into(),
-            )))
-            .unwrap();
-        assert_eq!(reopened.document.id, "user.warm-piano");
-        assert_eq!(reopened.preview_sound_id, "dls.b00000000.p00000000");
-    }
-
-    #[test]
-    fn declarative_editor_owns_program_payload_mutations() {
-        let plugin = synthetic_plugin();
-        let created = plugin
-            .begin_program_edit(&ProgramEditRequest::new(None))
-            .unwrap();
-        let view = plugin
-            .program_editor_view(created.document.clone())
-            .unwrap();
-        assert_eq!(view.validate(), Ok(()));
-        assert_eq!(view.title, "RF-Soundfonts");
-        assert_eq!(
-            view.pages
+        assert!(!catalog.presets[0].editable);
+        assert!(
+            catalog
+                .presets
                 .iter()
-                .map(|page| page.label.as_str())
-                .collect::<Vec<_>>(),
-            ["LAYER A", "LAYER B", "FX", "OUTPUT"]
+                .all(|preset| preset.bank.as_deref() != Some("custom"))
         );
-
-        let enabled = plugin
-            .apply_program_edit(ProgramFieldEditRequest {
-                schema_version: rackforge_plugin_api::PROGRAM_EDITOR_SCHEMA_VERSION,
-                document: created.document,
-                field_id: "layer.b.enabled".into(),
-                value: rackforge_plugin_api::ProgramEditorValue::Boolean(true),
-            })
-            .unwrap();
-        let program = CustomProgram::from_document(enabled.document.clone()).unwrap();
-        assert_eq!(program.layers.len(), 2);
-        assert!(program.layers[1].enabled);
-
-        let quieter = plugin
-            .apply_program_edit(ProgramFieldEditRequest {
-                schema_version: rackforge_plugin_api::PROGRAM_EDITOR_SCHEMA_VERSION,
-                document: enabled.document,
-                field_id: "layer.b.gain".into(),
-                value: rackforge_plugin_api::ProgramEditorValue::Integer(75),
-            })
-            .unwrap();
-        let program = CustomProgram::from_document(quieter.document).unwrap();
-        assert_eq!(program.layers[0].parameters.gain, 1.0);
-        assert_eq!(program.layers[1].parameters.gain, 0.75);
-
-        let exciter = plugin
-            .apply_program_edit(ProgramFieldEditRequest {
-                schema_version: rackforge_plugin_api::PROGRAM_EDITOR_SCHEMA_VERSION,
-                document: program.to_document().unwrap(),
-                field_id: "fx.exciter.enabled".into(),
-                value: rackforge_plugin_api::ProgramEditorValue::Boolean(true),
-            })
-            .unwrap();
-        let exciter = plugin
-            .apply_program_edit(ProgramFieldEditRequest {
-                schema_version: rackforge_plugin_api::PROGRAM_EDITOR_SCHEMA_VERSION,
-                document: exciter.document,
-                field_id: "fx.exciter.emphatic-point".into(),
-                value: rackforge_plugin_api::ProgramEditorValue::Integer(7),
-            })
-            .unwrap();
-        let program = CustomProgram::from_document(exciter.document).unwrap();
-        assert!(program.effects.exciter.enabled);
-        assert_eq!(program.effects.exciter.emphatic_point, 7);
-
-        let chorus = plugin
-            .apply_program_edit(ProgramFieldEditRequest {
-                schema_version: rackforge_plugin_api::PROGRAM_EDITOR_SCHEMA_VERSION,
-                document: program.to_document().unwrap(),
-                field_id: "fx.chorus.enabled".into(),
-                value: rackforge_plugin_api::ProgramEditorValue::Boolean(true),
-            })
-            .unwrap();
-        let chorus = plugin
-            .apply_program_edit(ProgramFieldEditRequest {
-                schema_version: rackforge_plugin_api::PROGRAM_EDITOR_SCHEMA_VERSION,
-                document: chorus.document,
-                field_id: "fx.chorus.rate".into(),
-                value: rackforge_plugin_api::ProgramEditorValue::Integer(125),
-            })
-            .unwrap();
-        let program = CustomProgram::from_document(chorus.document).unwrap();
-        assert!(program.effects.chorus.enabled);
-        assert_eq!(program.effects.chorus.rate_hz, 1.25);
-
-        let reverb = plugin
-            .apply_program_edit(ProgramFieldEditRequest {
-                schema_version: rackforge_plugin_api::PROGRAM_EDITOR_SCHEMA_VERSION,
-                document: program.to_document().unwrap(),
-                field_id: "fx.reverb.enabled".into(),
-                value: rackforge_plugin_api::ProgramEditorValue::Boolean(true),
-            })
-            .unwrap();
-        let reverb = plugin
-            .apply_program_edit(ProgramFieldEditRequest {
-                schema_version: rackforge_plugin_api::PROGRAM_EDITOR_SCHEMA_VERSION,
-                document: reverb.document,
-                field_id: "fx.reverb.decay".into(),
-                value: rackforge_plugin_api::ProgramEditorValue::Integer(375),
-            })
-            .unwrap();
-        let program = CustomProgram::from_document(reverb.document).unwrap();
-        assert!(program.effects.reverb.enabled);
-        assert_eq!(program.effects.reverb.decay_seconds, 3.75);
     }
 
     #[test]
-    fn draft_preview_applies_layers_without_installing_a_catalog_program() {
+    fn midi_drives_the_selected_library_instrument() {
         let mut plugin = synthetic_plugin();
-        plugin.note_on(60, 127);
-        assert_eq!(plugin.voices.len(), 1);
-        let mut program = custom_program();
-        let mut layer_b = program.layers[0].clone();
-        layer_b.id = "b".into();
-        layer_b.parameters.gain = 0.5;
-        layer_b.parameters.lfo.delay_seconds = Some(0.25);
-        program.layers.push(layer_b);
-        let prepared = program.prepared().unwrap();
-
-        plugin.preview_program(prepared).unwrap();
-        assert_eq!(plugin.active_layers.len(), 2);
-        assert!(plugin.selected_preset_id.starts_with("preview."));
-        assert!(plugin.custom_programs.is_empty());
-        assert_eq!(plugin.voices.len(), 1);
-
-        plugin.note_on(62, 127);
-        assert_eq!(plugin.voices.len(), 3);
-    }
-
-    #[test]
-    fn note_on_and_note_off_drive_a_voice() {
-        let mut plugin = synthetic_plugin();
-        plugin.note_on(60, 127);
-        assert_eq!(plugin.voices.len(), 1);
-        assert_ne!(plugin.render_frame().mono(), 0.0);
-        plugin.note_off(60);
-        assert!(!plugin.held_notes[60]);
-        for _ in 0..600 {
-            plugin.render_frame();
-        }
-        assert!(plugin.voices.is_empty());
-    }
-
-    #[test]
-    fn sustain_defers_release_until_the_pedal_lifts() {
-        let mut plugin = synthetic_plugin();
-        plugin.note_on(60, 100);
         plugin.handle_midi(MidiEventV1 {
             frame: 0,
+            data: [0x90, 60, 100],
             length: 3,
-            data: [0xb0, 64, 127],
         });
+        assert!(!plugin.voices.is_empty());
+        let [left, right] = plugin.render_frame();
+        assert_ne!(left + right, 0.0);
         plugin.handle_midi(MidiEventV1 {
             frame: 0,
-            length: 3,
             data: [0x80, 60, 0],
-        });
-        for _ in 0..600 {
-            plugin.render_frame();
-        }
-        assert_eq!(plugin.voices.len(), 1);
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
             length: 3,
-            data: [0xb0, 64, 0],
-        });
-        for _ in 0..600 {
-            plugin.render_frame();
-        }
-        assert!(plugin.voices.is_empty());
-    }
-
-    #[test]
-    fn all_notes_off_respects_sustain_but_all_sound_off_does_not() {
-        let mut plugin = synthetic_plugin();
-        plugin.note_on(60, 100);
-        plugin.set_sustain(true);
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0xb0, 123, 0],
-        });
-        assert_eq!(plugin.voices.len(), 1);
-        assert!(!plugin.held_notes[60]);
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0xb0, 120, 0],
-        });
-        assert!(plugin.voices.is_empty());
-        assert!(!plugin.sustain);
-    }
-
-    #[test]
-    fn midi_note_on_with_zero_velocity_is_note_off() {
-        let mut plugin = synthetic_plugin();
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0x90, 60, 127],
-        });
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0x90, 60, 0],
         });
         assert!(!plugin.held_notes[60]);
     }
 
     #[test]
-    fn pitch_bend_uses_the_full_fourteen_bit_range() {
+    fn state_round_trip_preserves_gain_and_selected_sound() {
         let mut plugin = synthetic_plugin();
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0xe0, 0, 0],
-        });
-        assert_eq!(plugin.pitch_bend_normalized, -1.0);
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0xe0, 0, 64],
-        });
-        assert_eq!(plugin.pitch_bend_normalized, 0.0);
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0xe0, 127, 127],
-        });
-        assert_eq!(plugin.pitch_bend_normalized, 1.0);
-    }
-
-    #[test]
-    fn mod_wheel_and_reset_controllers_update_plugin_state() {
-        let mut plugin = synthetic_plugin();
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0xb0, 1, 127],
-        });
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0xe0, 127, 127],
-        });
-        assert_eq!(plugin.modulation_wheel, 1.0);
-        assert_eq!(plugin.pitch_bend_normalized, 1.0);
-        plugin.handle_midi(MidiEventV1 {
-            frame: 0,
-            length: 3,
-            data: [0xb0, 121, 0],
-        });
-        assert_eq!(plugin.modulation_wheel, 0.0);
-        assert_eq!(plugin.pitch_bend_normalized, 0.0);
-    }
-
-    #[test]
-    fn state_round_trip_preserves_gain_and_program() {
-        let mut plugin = synthetic_plugin();
-        plugin.master_gain = 0.25;
-        let mut program = custom_program();
-        program.gain = 0.72;
-        program.layers[0].parameters.transpose_semitones = 7;
-        program.effects.chorus.enabled = true;
-        program.effects.chorus.mix = 0.33;
-        assert!(plugin.apply_custom_program(program, "preview.unsaved"));
+        plugin.master_gain = 0.42;
         let state = state_bytes(&plugin);
-        plugin.master_gain = 1.0;
-        assert!(plugin.select_instrument(0, 0));
+        assert_eq!(&state[..4], b"RFD4");
+
+        plugin.master_gain = 0.9;
+        plugin.selected_preset_id = "invalid".into();
         let status = unsafe {
             load_state(
                 (&mut plugin as *mut RfDls).cast(),
@@ -2257,11 +1429,44 @@ mod tests {
             )
         };
         assert_eq!(status, STATUS_OK);
-        assert_eq!(plugin.master_gain, 0.25);
-        assert_eq!(plugin.selected_preset_id, "preview.unsaved");
-        assert_eq!(plugin.program_gain_target, 0.72);
-        assert_eq!(plugin.active_layers[0].parameters.transpose_semitones, 7);
-        assert!(plugin.active_effects.chorus.enabled);
-        assert_eq!(plugin.active_effects.chorus.mix, 0.33);
+        assert_eq!(plugin.master_gain, 0.42);
+        assert_eq!(plugin.selected_preset_id, "dls.b00000000.p00000000");
+    }
+
+    #[test]
+    fn version_three_custom_state_migrates_to_its_primary_library_sound() {
+        let mut plugin = synthetic_plugin();
+        let legacy = serde_json::json!({
+            "schema_version": 3,
+            "master_gain": 0.5,
+            "selected_preset_id": "custom.user.warm-piano",
+            "active_program": {
+                "slot": 1,
+                "gain": 0.75,
+                "layers": [{
+                    "id": "a",
+                    "enabled": true,
+                    "source": {
+                        "resource_id": "dls-bank",
+                        "bank": 0,
+                        "program": 0
+                    },
+                    "parameters": {}
+                }],
+                "effects": {}
+            }
+        });
+        let mut state = b"RFD3".to_vec();
+        state.extend_from_slice(&serde_json::to_vec(&legacy).unwrap());
+        let status = unsafe {
+            load_state(
+                (&mut plugin as *mut RfDls).cast(),
+                state.as_ptr(),
+                state.len(),
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(plugin.selected_preset_id, "dls.b00000000.p00000000");
+        assert_eq!(plugin.master_gain, 0.5);
     }
 }

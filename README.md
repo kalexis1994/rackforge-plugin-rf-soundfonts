@@ -2,8 +2,8 @@
 
 RF-Soundfonts is an independently versioned RackForge instrument plugin that reads
 user-provided DLS Level 1/2 banks. This repository owns the DLS parser and
-synthesizer, the native RackForge plugin adapter, its declarative program
-editor, and its static Web surfaces.
+synthesizer, the native RackForge plugin adapter, the portable SoundFont
+component, and their static Web surfaces.
 
 The repository never distributes a Microsoft, Roland, or third-party sound
 bank. Users install their own `.dls` resource through RackForge.
@@ -11,8 +11,9 @@ bank. Users install their own `.dls` resource through RackForge.
 ## Layout
 
 ```text
-crates/rf-soundfonts-engine/  DLS parser and sample engine
-plugin/                RackForge ABI adapter and plugin-owned surfaces
+crates/rf-soundfonts-engine/  Sample-library parser and playback engine
+plugin/                       Native RackForge ABI adapter and Web surfaces
+portable-plugin/              Cross-platform wasm-v1 SoundFont component
 ```
 
 ## Local development
@@ -34,8 +35,8 @@ bash tools/build-package.sh
 ```
 
 The resulting directory has the `.rfplugin` extension and contains only the
-manifest, native binary, and static Web assets. DLS banks and user programs are
-external data and are never copied into the package.
+manifest, native binary, and static Web assets. DLS banks and user libraries
+are external data and are never copied into the package.
 
 ## Compatibility
 

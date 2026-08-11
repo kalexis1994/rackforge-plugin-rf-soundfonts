@@ -1,138 +1,50 @@
-# RF-Soundfonts
+# RF-Soundfonts native adapter
 
-RF-Soundfonts es el plugin de instrumento DLS nativo de RackForge. El binario no
-incluye sonidos: recibe un archivo DLS aportado por el usuario mediante el
-recurso obligatorio `dls-bank`.
+This crate exposes the RF-Soundfonts sample engine through RackForge's native
+Plugin API. It is the current dynamic-library implementation for DLS and SFZ
+resources.
 
-## Contrato inicial
+## Responsibilities
 
-- ID estable: `org.rackforge.rf-soundfonts`
-- Package requirement: RackForge Plugin API 1.5
-- Native entry point: ABI 1.3 (compatible with hosts implementing API 1.5)
-- Tipo: instrumento
-- Polifonía máxima: 32 voces
-- Salida: estéreo; sin FX conserva la señal mono original en ambos canales
-- Banco inicial: General MIDI bank 0, program 0
-- Preset inicial: `gm.piano-1`
-- Estado v3: captura opaca completa de capas, envelopes, modulación, FX,
-  ganancias y contexto del programa activo; sigue leyendo estados v1/v2
-- Catálogo dinámico separado en `DLS` (solo lectura) y `CUSTOM`
+- Load the optional `dls-bank` and `sfz-library` resources supplied by the
+  host.
+- Publish a read-only catalog containing the instruments discovered in those
+  libraries.
+- Select and play exactly one library instrument per plugin instance.
+- Process MIDI, master gain automation and stereo audio.
+- Save the selected sound and master gain as opaque plugin state.
+- Provide PLAY and CONFIG Web surfaces owned by the plugin.
 
-## MIDI implementado
+Layers, splits, MIDI routing, panorama and complete performance setups belong
+to the RackForge rack. This plugin intentionally has no Custom Program catalog,
+program editor, program-extension ABI or plugin-owned effects chain.
 
-- Note On
-- Note Off
-- Note On con velocidad cero como Note Off
-- Pitch Bend de 14 bits, inicialmente con rango de ±2 semitonos
-- CC1 modulation wheel aplicado a las conexiones LFO del instrumento DLS
-- CC64 sustain, con liberación diferida hasta levantar el pedal
-- CC121 Reset All Controllers
-- CC120 All Sound Off, que corta y limpia inmediatamente todas las voces
-- CC123 All Notes Off, que respeta el estado del pedal
+## State compatibility
 
-El procesamiento acepta eventos posicionados dentro del bloque. El camino de
-audio no abre archivos, no escribe logs, no toma locks y no asigna memoria al
-crear voces.
+State version 4 stores:
 
-## Recurso externo
+- the selected library sound ID;
+- master gain.
 
-Ejemplo de prueba en ARM64:
+Readers for state versions 1, 2 and 3 remain available. When a version 3 state
+contains a former Custom Program, RF-Soundfonts selects its first enabled DLS
+source. Former layer overrides and effects are not retained because those
+features now belong to RackForge.
 
-```bash
-rackforge_root="${RACKFORGE_ROOT:-$HOME/rackforge}"
-rackforge-core smoke plugins/rf-soundfonts/package \
-  --library target/release/librackforge_rf_soundfonts.so \
-  --resource "dls-bank=$rackforge_root/data/plugins/rf-soundfonts/banks/gm.dls" \
-  --preset gm.piano-1 \
-  --data-root "$rackforge_root/data"
-```
+## Resources
 
-El `.dls` no debe copiarse al repositorio ni al futuro paquete `.rfplugin`.
+`dls-bank` is an optional DLS file. `sfz-library` is an optional directory
+containing one or more SFZ instruments and their samples. At least one usable
+library is needed to produce sound.
 
-## PLAY dinámico
+No Microsoft, Roland or third-party sound bank is distributed by this
+repository.
 
-Al crear la instancia, RF-Soundfonts ordena los instrumentos por banco y programa,
-elimina duplicados y publica un catálogo mediante Host API 1.5. El catálogo
-declara explícitamente cuáles presets puede reabrir el editor. Los IDs tienen
-esta forma opaca:
+## Development
 
-```text
-dls.b00000000.p00000030
-```
-
-RackForge usa el ID para seleccionar el sonido, pero la interfaz muestra el
-nombre y un detalle corto como `B000 P048` o `DRUM P000`. El bridge del KeyLab
-recibe además el banco lógico y presenta primero `DLS` o `CUSTOM`; no conoce la
-estructura interna del plugin.
-
-## Programas CUSTOM
-
-Los instrumentos descubiertos dentro del DLS son inmutables. Un CUSTOM no
-reescribe el banco: guarda una referencia a `dls-bank` + banco + programa y
-únicamente sus overrides. RF-Soundfonts busca documentos con sufijo
-`.rackforge-program.json` en:
-
-```text
-data/plugins/org.rackforge.rf-soundfonts/custom/
-```
-
-El payload v6 admite una capa `A` obligatoria y una capa `B` opcional. `A`
-siempre está habilitada; `B` puede desactivarse conservando toda su
-configuración. Cada capa referencia directamente un instrumento del DLS y
-define rangos de tecla y velocidad. Sus overrides
-incluyen nivel, transposición, afinación fina, rango de pitch bend, profundidad
-de modulación, envolventes de amplitud y pitch, y LFO con rate, delay y
-profundidades. Un valor opcional ausente significa `INHERIT`: el motor conserva
-el comportamiento original codificado en el instrumento DLS.
-
-Después del mix de capas, el programa dispone de una cadena FX compartida. El
-primer nodo es un exciter de topología clásica con enable, blend (-99 a +99),
-emphatic point (1 a 10), EQ low/high (-12 a +12 dB) y dry/wet. El EQ alimenta
-ramas paralelas limpia y excitada; la rama excitada genera presencia y
-armónicos a 2× sin introducir latencia en la ruta seca.
-
-El segundo nodo es un chorus estéreo con enable, rate, depth, delay, feedback,
-width y mix. Sus cambios se preescuchan mientras se mueve el control y se
-suavizan dentro del DSP para evitar saltos.
-
-El tercer nodo es una reverb ROOM estéreo con enable, size, decay, pre-delay,
-damping, width y mix. Usa una red de ocho delays realimentados y reserva todos
-sus buffers al activar el plugin; el hilo de audio no asigna memoria ni realiza
-I/O.
-
-Los documentos v1 existentes se migran en memoria a una única capa `A`; los v2
-conservan sus dos capas. Las versiones v1 y v2 reciben todos los FX
-desactivados; v3 recibe reverb y exciter desactivados; v4 recibe el exciter
-desactivado. El exciter v5 migra frequency al emphatic point más cercano y
-amount a dry/wet. La siguiente vez que el usuario los guarda se serializan como
-v6. IDs y slots
-duplicados, symlinks, archivos
-mayores a 256 KiB, payloads desconocidos o valores fuera de rango se ignoran
-individualmente y se registran como advertencia; no impiden arrancar el resto
-del banco.
-
-El ejemplo versionado
-`examples/custom.warm-piano.rackforge-program.json` se puede instalar mediante
-el escritor atómico común:
+From the repository root:
 
 ```bash
-rackforge_root="${RACKFORGE_ROOT:-$HOME/rackforge}"
-rackforge-core program-save "$rackforge_root/data" \
-  custom/custom.warm-piano.rackforge-program.json \
-  examples/custom.warm-piano.rackforge-program.json
+cargo test -p rackforge-rf-soundfonts
+cargo build --release -p rackforge-rf-soundfonts
 ```
-
-El ID de catálogo resultante es `custom.user.warm-piano`. Cambiar o agregar
-archivos requiere reiniciar el motor RF-Soundfonts para reconstruir el catálogo.
-
-Durante una edición, Core entrega al plugin el documento completo mediante la
-extensión de programas. RF-Soundfonts preescucha ese borrador de forma transitoria:
-las dos capas, sus overrides y los FX compartidos ya se oyen antes de
-guardar, pero el catálogo y los archivos sólo cambian después de confirmar
-`SAVE`.
-
-## Límites de esta etapa
-
-- Aún no responde a Bank Select ni Program Change MIDI.
-- Todos los canales MIDI controlan la misma instancia.
-- Los FX insertables y el paneo por capa todavía no están implementados.
