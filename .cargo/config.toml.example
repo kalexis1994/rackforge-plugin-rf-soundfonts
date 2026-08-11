@@ -5,6 +5,7 @@
 [patch."https://github.com/kalexis1994/rackforge.git"]
 rackforge-dsp = { path = "../rackforge/crates/rackforge-dsp" }
 rackforge-plugin-api = { path = "../rackforge/crates/rackforge-plugin-api" }
+rackforge-plugin-sdk = { path = "../rackforge/crates/rackforge-plugin-sdk" }
 rackforge-midi-api = { path = "../rackforge/crates/rackforge-midi-api" }
 rackforge-program-api = { path = "../rackforge/crates/rackforge-program-api" }
 rackforge-surface-api = { path = "../rackforge/crates/rackforge-surface-api" }

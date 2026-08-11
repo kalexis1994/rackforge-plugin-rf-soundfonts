@@ -1,0 +1,13 @@
+[package]
+name = "rackforge-rf-soundfonts-portable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rackforge-plugin-sdk.workspace = true
+rustysynth.workspace = true
+

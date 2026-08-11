@@ -2,7 +2,7 @@
 set -euo pipefail
 
 package="${1:-}"
-root="${RACKFORGE_ROOT:-/home/kalex/rackforge}"
+root="${RACKFORGE_ROOT:-$HOME/rackforge}"
 destination="$root/plugins/rf-soundfonts"
 
 if [[ -z "$package" || "$package" != *.rfplugin || ! -d "$package" ]]; then

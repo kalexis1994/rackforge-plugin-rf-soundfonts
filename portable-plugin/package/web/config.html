@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#090c10">
+    <title>RF-Soundfonts configuration</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="instrument config-instrument">
+      <header>
+        <div class="identity"><span>RF</span><strong>SOUNDFONTS</strong></div>
+        <p>LIBRARY SETTINGS</p>
+      </header>
+      <section class="panel config-panel">
+        <span class="status"><i></i><span>RACKFORGE STORAGE</span></span>
+        <h1>Sound library</h1>
+        <p class="subtitle">Authorize a folder containing your SoundFont collection. RackForge owns access to the folder on every platform.</p>
+        <div class="library-card">
+          <div>
+            <strong>User library</strong>
+            <span data-library-selection>No folder selected.</span>
+          </div>
+          <button type="button" data-select-library>Select folder</button>
+        </div>
+        <div class="library-files" data-library-files hidden>
+          <strong>SoundFonts in this folder</strong>
+          <div data-library-entries></div>
+        </div>
+      </section>
+      <footer><span>HOST-MANAGED ACCESS</span><span>NO NATIVE PATH EXPOSED</span></footer>
+    </main>
+    <script src="app.js" defer></script>
+  </body>
+</html>

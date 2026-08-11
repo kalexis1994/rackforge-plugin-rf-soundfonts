@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "banks": [{ "id": "factory", "name": "Factory", "order": 0 }],
+  "presets": [
+    {
+      "id": "factory.ydp-grand-piano",
+      "name": "YDP Grand Piano",
+      "description": "Acoustic grand piano sampled from a Yamaha Disklavier Pro",
+      "bank": "factory",
+      "category": "Piano",
+      "order": 0,
+      "tags": ["acoustic", "grand", "piano"]
+    }
+  ]
+}
+

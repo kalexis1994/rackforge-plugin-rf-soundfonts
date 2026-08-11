@@ -1,4 +1,5 @@
 /target/
+/artifacts/
 /.cargo/config.toml
 /*.rfplugin/
 *.dls

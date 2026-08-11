@@ -39,11 +39,12 @@ crear voces.
 Ejemplo de prueba en ARM64:
 
 ```bash
+rackforge_root="${RACKFORGE_ROOT:-$HOME/rackforge}"
 rackforge-core smoke plugins/rf-soundfonts/package \
   --library target/release/librackforge_rf_soundfonts.so \
-  --resource dls-bank=/home/kalex/rackforge/data/plugins/rf-soundfonts/banks/gm.dls \
+  --resource "dls-bank=$rackforge_root/data/plugins/rf-soundfonts/banks/gm.dls" \
   --preset gm.piano-1 \
-  --data-root /home/kalex/rackforge/data
+  --data-root "$rackforge_root/data"
 ```
 
 El `.dls` no debe copiarse al repositorio ni al futuro paquete `.rfplugin`.
@@ -115,7 +116,8 @@ El ejemplo versionado
 el escritor atómico común:
 
 ```bash
-rackforge-core program-save /home/kalex/rackforge/data \
+rackforge_root="${RACKFORGE_ROOT:-$HOME/rackforge}"
+rackforge-core program-save "$rackforge_root/data" \
   custom/custom.warm-piano.rackforge-program.json \
   examples/custom.warm-piano.rackforge-program.json
 ```
