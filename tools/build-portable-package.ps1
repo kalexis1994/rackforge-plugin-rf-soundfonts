@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$cargoToolchain = if ($IsWindows) { '+stable-x86_64-pc-windows-msvc' } else { '+stable' }
 if (-not $RackForgeRoot) { $RackForgeRoot = Join-Path (Split-Path $repoRoot) 'rackforge' }
 $RackForgeRoot = (Resolve-Path $RackForgeRoot).Path
 if (-not $Output) { $Output = Join-Path $repoRoot 'artifacts\rf-soundfonts-0.2.0.rfplugin' }
@@ -29,20 +30,21 @@ try {
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -ne $sourceSha256) { throw 'YDP source archive checksum mismatch' }
     tar -xjf $source -C $extract
     if ($LASTEXITCODE -ne 0) { throw 'Could not extract the YDP source archive' }
-    $bank = Join-Path $extract 'YDP-GrandPiano-SF2-20160804\YDP-GrandPiano-20160804.sf2'
-    $attribution = Join-Path $extract 'YDP-GrandPiano-SF2-20160804\YDP-GrandPiano-20160804.txt'
+    $sourceDirectory = Join-Path $extract 'YDP-GrandPiano-SF2-20160804'
+    $bank = Join-Path $sourceDirectory 'YDP-GrandPiano-20160804.sf2'
+    $attribution = Join-Path $sourceDirectory 'YDP-GrandPiano-20160804.txt'
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $bank).Hash -ne $bankSha256) { throw 'YDP SoundFont checksum mismatch' }
 
-    cargo +stable-x86_64-pc-windows-msvc build --locked --release -p rackforge-rf-soundfonts-portable --target wasm32-unknown-unknown
+    cargo $cargoToolchain build --locked --release -p rackforge-rf-soundfonts-portable --target wasm32-unknown-unknown
     if ($LASTEXITCODE -ne 0) { throw 'WebAssembly build failed' }
-    Copy-Item (Join-Path $repoRoot 'portable-plugin\package\*') $package -Recurse
+    Copy-Item (Join-Path $repoRoot 'portable-plugin/package/*') $package -Recurse
     New-Item -ItemType Directory -Path (Join-Path $package 'assets') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $package 'licenses') -Force | Out-Null
-    Copy-Item $bank (Join-Path $package 'assets\ydp-grand-piano.sf2')
-    Copy-Item $attribution (Join-Path $package 'licenses\YDP-Grand-Piano.txt')
+    Copy-Item $bank (Join-Path $package 'assets/ydp-grand-piano.sf2')
+    Copy-Item $attribution (Join-Path $package 'licenses/YDP-Grand-Piano.txt')
     Copy-Item (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') $package
     New-Item -ItemType Directory -Path (Split-Path $Output) -Force | Out-Null
-    cargo +stable-x86_64-pc-windows-msvc run --manifest-path (Join-Path $RackForgeRoot 'Cargo.toml') --locked -p rackforge-store -- pack-wasm $package (Join-Path $repoRoot 'target\wasm32-unknown-unknown\release\rackforge_rf_soundfonts_portable.wasm') $Output
+    cargo $cargoToolchain run --manifest-path (Join-Path $RackForgeRoot 'Cargo.toml') --locked -p rackforge-store -- pack-wasm $package (Join-Path $repoRoot 'target/wasm32-unknown-unknown/release/rackforge_rf_soundfonts_portable.wasm') $Output
     if ($LASTEXITCODE -ne 0) { throw 'RackForge packaging failed' }
 } finally {
     Pop-Location

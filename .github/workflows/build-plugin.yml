@@ -16,7 +16,7 @@ concurrency:
 jobs:
   portable-plugin:
     name: Portable .rfplugin
-    runs-on: windows-2022
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     defaults:
       run:
@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Check out RF-Soundfonts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: rf-soundfonts
 
@@ -38,7 +38,7 @@ jobs:
           }
 
       - name: Check out pinned RackForge SDK
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: kalexis1994/rackforge
           ref: cd6b5a889b9d29eac857bdf452ad9a5ae102b9e0
@@ -51,11 +51,32 @@ jobs:
         run: |
           Copy-Item .cargo/config.toml.example .cargo/config.toml
 
+      - name: Install native test dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
       - name: Set up Rust and WebAssembly target
         shell: pwsh
         run: |
           rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
           rustup default stable
+
+      - name: Cache Cargo dependencies and build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rf-soundfonts/target
+            rackforge/target
+          key: ${{ runner.os }}-rf-soundfonts-${{ hashFiles('rf-soundfonts/Cargo.lock', 'rackforge/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rf-soundfonts-
 
       - name: Test workspace
         shell: pwsh
