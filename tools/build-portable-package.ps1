@@ -25,7 +25,7 @@ New-Item -ItemType Directory -Path $package -Force | Out-Null
 
 Push-Location $repoRoot
 try {
-    Invoke-WebRequest -Uri $sourceUrl -OutFile $source
+    Invoke-WebRequest -Uri $sourceUrl -OutFile $source -MaximumRetryCount 3 -RetryIntervalSec 2
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -ne $sourceSha256) { throw 'YDP source archive checksum mismatch' }
     tar -xjf $source -C $extract
     if ($LASTEXITCODE -ne 0) { throw 'Could not extract the YDP source archive' }

@@ -38,6 +38,17 @@ The resulting directory has the `.rfplugin` extension and contains only the
 manifest, native binary, and static Web assets. DLS banks and user libraries
 are external data and are never copied into the package.
 
+## Continuous delivery
+
+Every push to `main` builds and tests the portable WebAssembly plugin on GitHub
+Actions. A successful run publishes `RF-Soundfonts-<version>.rfplugin` and its
+SHA-256 checksum as a workflow artifact retained for 30 days. The workflow can
+also be started manually from the Actions page.
+
+The workflow reads the private RackForge SDK at its pinned revision through a
+dedicated, read-only deploy key. The private half is stored in this repository
+as the `RACKFORGE_DEPLOY_KEY` Actions secret; it grants no write access.
+
 ## Compatibility
 
 Version `0.1.0` targets RackForge Plugin API 1.5 and `little@1`. Its SDK

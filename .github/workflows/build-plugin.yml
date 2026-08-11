@@ -1,0 +1,88 @@
+name: Build RF-Soundfonts plugin
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-rf-soundfonts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable-plugin:
+    name: Portable .rfplugin
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out RF-Soundfonts
+        uses: actions/checkout@v4
+
+      - name: Require RackForge deploy key
+        shell: pwsh
+        env:
+          RACKFORGE_DEPLOY_KEY: ${{ secrets.RACKFORGE_DEPLOY_KEY }}
+        run: |
+          if (-not $env:RACKFORGE_DEPLOY_KEY) {
+            throw 'RACKFORGE_DEPLOY_KEY is required to read the private RackForge SDK repository.'
+          }
+
+      - name: Check out pinned RackForge SDK
+        uses: actions/checkout@v4
+        with:
+          repository: kalexis1994/rackforge
+          ref: cd6b5a889b9d29eac857bdf452ad9a5ae102b9e0
+          path: rackforge-host
+          ssh-key: ${{ secrets.RACKFORGE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Use the pinned local SDK checkout
+        shell: pwsh
+        run: |
+          $config = Get-Content -Raw .cargo/config.toml.example
+          $config = $config.Replace('../rackforge/', 'rackforge-host/')
+          Set-Content -LiteralPath .cargo/config.toml -Value $config -NoNewline
+
+      - name: Set up Rust and WebAssembly target
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Test workspace
+        shell: pwsh
+        run: cargo test --workspace --locked
+
+      - name: Build portable plugin package
+        id: package
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -Raw portable-plugin/package/rackforge-plugin.toml
+          if ($manifest -notmatch '(?m)^version = "([^"]+)"\s*$') {
+            throw 'Could not read the plugin version from rackforge-plugin.toml.'
+          }
+          $version = $Matches[1]
+          $output = Join-Path $PWD "artifacts/RF-Soundfonts-$version.rfplugin"
+          ./tools/build-portable-package.ps1 `
+            -RackForgeRoot (Join-Path $PWD 'rackforge-host') `
+            -Output $output
+          $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $output).Hash.ToLowerInvariant()
+          "$digest  $([System.IO.Path]::GetFileName($output))" |
+            Set-Content -LiteralPath "$output.sha256" -NoNewline
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact=$output" >> $env:GITHUB_OUTPUT
+
+      - name: Upload RF-Soundfonts package
+        uses: actions/upload-artifact@v4
+        with:
+          name: RF-Soundfonts-${{ steps.package.outputs.version }}-${{ github.sha }}
+          path: |
+            ${{ steps.package.outputs.artifact }}
+            ${{ steps.package.outputs.artifact }}.sha256
+          if-no-files-found: error
+          retention-days: 30
