@@ -1,9 +1,12 @@
 name: Build RF-Soundfonts plugin
 
 on:
+  pull_request:
   push:
     branches:
       - main
+    tags:
+      - "v*.*.*"
   workflow_dispatch:
 
 permissions:
@@ -11,13 +14,16 @@ permissions:
 
 concurrency:
   group: build-rf-soundfonts-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  portable-plugin:
+  portable_plugin:
     name: Portable .rfplugin
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+      version: ${{ steps.package.outputs.version }}
     defaults:
       run:
         working-directory: rf-soundfonts
@@ -28,28 +34,17 @@ jobs:
         with:
           path: rf-soundfonts
 
-      - name: Require RackForge deploy key
-        shell: pwsh
-        env:
-          RACKFORGE_DEPLOY_KEY: ${{ secrets.RACKFORGE_DEPLOY_KEY }}
-        run: |
-          if (-not $env:RACKFORGE_DEPLOY_KEY) {
-            throw 'RACKFORGE_DEPLOY_KEY is required to read the private RackForge SDK repository.'
-          }
-
-      - name: Check out pinned RackForge SDK
+      - name: Check out pinned public RackForge SDK
         uses: actions/checkout@v6
         with:
           repository: kalexis1994/rackforge
           ref: 0fd1b678a3f3c15eb5107d28151440fa423b712c
           path: rackforge
-          ssh-key: ${{ secrets.RACKFORGE_DEPLOY_KEY }}
           persist-credentials: false
 
       - name: Use the pinned local SDK checkout
         shell: pwsh
-        run: |
-          Copy-Item .cargo/config.toml.example .cargo/config.toml
+        run: Copy-Item .cargo/config.toml.example .cargo/config.toml
 
       - name: Install native test dependencies
         shell: bash
@@ -91,22 +86,71 @@ jobs:
             throw 'Could not read the plugin version from rackforge-plugin.toml.'
           }
           $version = $Matches[1]
-          $output = Join-Path $PWD "artifacts/RF-Soundfonts-$version.rfplugin"
+          if ($env:GITHUB_REF -like 'refs/tags/*' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag $env:GITHUB_REF_NAME does not match plugin version $version."
+          }
+          $artifactName = "RF-Soundfonts-$version-$env:GITHUB_SHA"
+          $output = Join-Path $PWD 'artifacts/RF-Soundfonts.rfplugin'
           ./tools/build-portable-package.ps1 `
             -RackForgeRoot (Join-Path (Split-Path $PWD) 'rackforge') `
             -Output $output
           $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $output).Hash.ToLowerInvariant()
           "$digest  $([System.IO.Path]::GetFileName($output))" |
             Set-Content -LiteralPath "$output.sha256" -NoNewline
+          "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "artifact=$output" >> $env:GITHUB_OUTPUT
 
       - name: Upload RF-Soundfonts package
         uses: actions/upload-artifact@v4
         with:
-          name: RF-Soundfonts-${{ steps.package.outputs.version }}-${{ github.sha }}
+          name: ${{ steps.package.outputs.artifact_name }}
           path: |
             ${{ steps.package.outputs.artifact }}
             ${{ steps.package.outputs.artifact }}.sha256
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: portable_plugin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.portable_plugin.outputs.artifact_name }}
+          path: release
+
+      - name: Verify release checksum
+        shell: bash
+        working-directory: release
+        run: sha256sum --check RF-Soundfonts.rfplugin.sha256
+
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.portable_plugin.outputs.version }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber --repo "$REPOSITORY"
+          else
+            release_flags=()
+            if [[ "$tag" == *-* ]]; then
+              release_flags+=(--prerelease)
+            fi
+            gh release create "$tag" release/* \
+              --repo "$REPOSITORY" \
+              --verify-tag \
+              --title "RF-Soundfonts v$VERSION" \
+              --generate-notes \
+              "${release_flags[@]}"
+          fi

@@ -1,65 +1,90 @@
-# RackForge RF-Soundfonts
+# RF-Soundfonts
 
-RF-Soundfonts is an independently versioned RackForge instrument plugin that reads
-user-provided DLS Level 1/2 banks. This repository owns the DLS parser and
-synthesizer, the native RackForge plugin adapter, the portable SoundFont
-component, and their static Web surfaces.
+RF-Soundfonts is a portable RackForge instrument plugin built around the
+RustySynth SoundFont engine. Its factory program is the openly licensed
+**YDP Grand Piano**, so RackForge can provide a playable instrument without
+requiring proprietary ROMs or platform-specific binaries.
 
-The repository never distributes a Microsoft, Roland, or third-party sound
-bank. Users install their own `.dls` resource through RackForge.
+The released `.rfplugin` uses RackForge's `wasm-v1` runtime and runs unchanged
+on Windows, Android, and Raspberry Pi.
 
-## Layout
+## Install
+
+Download `RF-Soundfonts.rfplugin` from the
+[latest release](https://github.com/kalexis1994/rackforge-plugin-rf-soundfonts/releases/latest)
+and install it from RackForge's Plugins section.
+
+Once the first tagged release exists, the current package will also have a
+stable download URL:
 
 ```text
-crates/rf-soundfonts-engine/  Sample-library parser and playback engine
-plugin/                       Native RackForge ABI adapter and Web surfaces
-portable-plugin/              Cross-platform wasm-v1 SoundFont component
+https://github.com/kalexis1994/rackforge-plugin-rf-soundfonts/releases/latest/download/RF-Soundfonts.rfplugin
+```
+
+The plugin package contains:
+
+- the portable WebAssembly component;
+- PLAY and CONFIG Web surfaces;
+- the YDP Grand Piano SoundFont and its attribution;
+- runtime, parameter, and preset metadata.
+
+## Repository layout
+
+```text
+portable-plugin/              Cross-platform wasm-v1 component and package
+crates/rf-soundfonts-engine/  Sample-library parsing and playback engine
+plugin/                       Legacy native adapter and Web surface
+tools/                        Reproducible packaging and installation helpers
 ```
 
 ## Local development
 
-For adjacent checkouts named `rackforge` and `rackforge-plugin-rf-soundfonts`, copy
-`.cargo/config.toml.example` to `.cargo/config.toml`. This replaces the pinned
-Git SDK source with the local RackForge API crates without changing release
-metadata.
+For adjacent checkouts named `rackforge` and
+`rackforge-plugin-rf-soundfonts`, copy `.cargo/config.toml.example` to
+`.cargo/config.toml`. This replaces the pinned Git SDK sources with the local
+RackForge API crates without changing release metadata.
 
 ```bash
-cargo test --workspace
-cargo build --release -p rackforge-rf-soundfonts
+cargo test --workspace --locked
 ```
 
-Package the current platform build on Linux with:
+Build the portable package with PowerShell 7 and a RackForge checkout:
 
-```bash
-bash tools/build-package.sh
+```powershell
+./tools/build-portable-package.ps1 `
+  -RackForgeRoot ../rackforge `
+  -Output ./artifacts/RF-Soundfonts.rfplugin
 ```
 
-The resulting directory has the `.rfplugin` extension and contains only the
-manifest, native binary, and static Web assets. DLS banks and user libraries
-are external data and are never copied into the package.
+The packer downloads the upstream YDP Grand Piano archive, verifies both the
+source archive and SoundFont SHA-256 digests, builds the WebAssembly component,
+and asks RackForge's own store tool to create the final `.rfplugin` archive.
 
 ## Continuous delivery
 
-Every push to `main` builds and tests the portable WebAssembly plugin on GitHub
-Actions. A successful run publishes `RF-Soundfonts-<version>.rfplugin` and its
-SHA-256 checksum as a workflow artifact retained for 30 days. The workflow can
-also be started manually from the Actions page.
+GitHub Actions performs the following checks:
 
-The workflow reads the private RackForge SDK at its pinned revision through a
-dedicated, read-only deploy key. The private half is stored in this repository
-as the `RACKFORGE_DEPLOY_KEY` Actions secret; it grants no write access.
+- pull requests and pushes to `main` test the complete workspace;
+- every successful run builds `RF-Soundfonts.rfplugin` and its SHA-256 file as
+  a workflow artifact retained for 30 days;
+- a version tag such as `v0.2.0` must match the plugin manifest version;
+- a successful version tag creates a permanent GitHub release containing
+  `RF-Soundfonts.rfplugin` and `RF-Soundfonts.rfplugin.sha256`;
+- rerunning a tag safely replaces incomplete release assets.
+
+RackForge is public, so the workflow checks out the pinned SDK and package
+tooling without deploy keys or repository secrets.
 
 ## Compatibility
 
-Version `0.1.0` targets RackForge Plugin API 1.5 and `little@1`. Its SDK
-dependency is pinned to RackForge source revision
-`136960b3dd7748865b6a0a3d43af9c69bbcdea16` until the SDK crates receive
-independent published releases.
+RF-Soundfonts `0.2.0` targets RackForge Plugin API `1.7`, the portable
+`wasm-v1` runtime, and the `little@1` controller surface. RackForge SDK sources
+and package tooling remain pinned to tested Git revisions for reproducible
+builds.
 
-During the split, `.cargo/config.toml` is intentionally local-only: it points
-at the adjacent RackForge checkout containing API 1.5. Once those host changes
-are committed, the Git revision above must be advanced to that commit before
-publishing the first package.
+## Licensing
 
-The code originated in the RackForge monorepository and was separated after
-RackForge commit `136960b3dd7748865b6a0a3d43af9c69bbcdea16`.
+RF-Soundfonts is distributed under GPL-3.0-or-later. The YDP Grand Piano is
+licensed under Creative Commons Attribution 3.0 Unported. RustySynth is
+distributed under the MIT license. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+for attribution and source links.
