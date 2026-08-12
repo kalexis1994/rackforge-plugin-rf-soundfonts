@@ -42,6 +42,7 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $package 'licenses') -Force | Out-Null
     Copy-Item $bank (Join-Path $package 'assets/ydp-grand-piano.sf2')
     Copy-Item $attribution (Join-Path $package 'licenses/YDP-Grand-Piano.txt')
+    Copy-Item (Join-Path $repoRoot 'LICENSE') $package
     Copy-Item (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') $package
     New-Item -ItemType Directory -Path (Split-Path $Output) -Force | Out-Null
     cargo $cargoToolchain run --manifest-path (Join-Path $RackForgeRoot 'Cargo.toml') --locked -p rackforge-store -- pack-wasm $package (Join-Path $repoRoot 'target/wasm32-unknown-unknown/release/rackforge_rf_soundfonts_portable.wasm') $Output
