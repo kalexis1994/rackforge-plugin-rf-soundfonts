@@ -25,5 +25,5 @@ rustysynth = { version = "1.3.6", default-features = false }
 # `.github/workflows/build-plugin.yml`. Contributors can override them with the
 # adjacent local checkout through `.cargo/config.toml`; see
 # `.cargo/config.toml.example`.
-rackforge-plugin-api = { git = "https://github.com/kalexis1994/rackforge.git", rev = "81b94f12d55f577f13c4fc2af272ff9f4210d0cc" }
-rackforge-plugin-sdk = { git = "https://github.com/kalexis1994/rackforge.git", rev = "81b94f12d55f577f13c4fc2af272ff9f4210d0cc" }
+rackforge-plugin-api = { git = "https://github.com/kalexis1994/rackforge.git", rev = "48bf53f1c9a6b6dc2ec2269ad5b390f796619ec9" }
+rackforge-plugin-sdk = { git = "https://github.com/kalexis1994/rackforge.git", rev = "48bf53f1c9a6b6dc2ec2269ad5b390f796619ec9" }
