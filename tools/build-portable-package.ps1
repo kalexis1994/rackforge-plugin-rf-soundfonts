@@ -8,7 +8,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $cargoToolchain = if ($IsWindows) { '+stable-x86_64-pc-windows-msvc' } else { '+stable' }
 if (-not $RackForgeRoot) { $RackForgeRoot = Join-Path (Split-Path $repoRoot) 'rackforge' }
 $RackForgeRoot = (Resolve-Path $RackForgeRoot).Path
-if (-not $Output) { $Output = Join-Path $repoRoot 'artifacts\rf-soundfonts-0.2.0.rfplugin' }
+if (-not $Output) { $Output = Join-Path $repoRoot 'artifacts\RF-Soundfonts.rfplugin' }
 $Output = [System.IO.Path]::GetFullPath($Output)
 if (-not $Output.EndsWith('.rfplugin', [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Output must end in .rfplugin' }
 if (Test-Path -LiteralPath $Output) { throw "Refusing to overwrite existing package $Output" }
@@ -28,7 +28,10 @@ Push-Location $repoRoot
 try {
     Invoke-WebRequest -Uri $sourceUrl -OutFile $source -MaximumRetryCount 3 -RetryIntervalSec 2
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -ne $sourceSha256) { throw 'YDP source archive checksum mismatch' }
-    tar -xjf $source -C $extract
+    # On Windows, Git's MSYS tar can shadow the system one and treats `C:\...`
+    # as a remote host; the System32 bsdtar handles Windows paths and bzip2.
+    $tar = if ($IsWindows) { Join-Path $env:SystemRoot 'System32\tar.exe' } else { 'tar' }
+    & $tar -xjf $source -C $extract
     if ($LASTEXITCODE -ne 0) { throw 'Could not extract the YDP source archive' }
     $sourceDirectory = Join-Path $extract 'YDP-GrandPiano-SF2-20160804'
     $bank = Join-Path $sourceDirectory 'YDP-GrandPiano-20160804.sf2'
