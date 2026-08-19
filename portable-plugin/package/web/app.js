@@ -25,6 +25,109 @@
       }, window.location.origin);
     });
 
+  // PLAY: sound browser and master volume ---------------------------------
+
+  const soundTitle = document.querySelector("[data-sound-title]");
+  const soundSubtitle = document.querySelector("[data-sound-subtitle]");
+  const soundBrowser = document.querySelector("[data-sound-browser]");
+  const soundList = document.querySelector("[data-sound-list]");
+  const playStatus = document.querySelector("[data-play-status]");
+  const volume = document.querySelector("[data-volume]");
+  const volumeValue = document.querySelector("[data-volume-value]");
+
+  const showVolume = (value) => {
+    if (!volume || !volumeValue) return;
+    volume.value = String(value);
+    volumeValue.textContent = `${Math.round(value * 100)}%`;
+  };
+
+  if (volume) {
+    let sendTimer = null;
+    volume.addEventListener("input", () => {
+      const value = Number(volume.value);
+      if (volumeValue) volumeValue.textContent = `${Math.round(value * 100)}%`;
+      // Collapse a drag into at most one request per frame-ish interval.
+      if (sendTimer) return;
+      sendTimer = setTimeout(() => {
+        sendTimer = null;
+        hostRequest("plugin.set_parameter", {
+          parameter_index: 0,
+          value: Number(volume.value),
+        }).catch(() => {
+          // The next context or parameter read restores the real value.
+        });
+      }, 60);
+    });
+  }
+
+  const renderSounds = (instance) => {
+    if (!soundList || !soundBrowser) return;
+    const sounds = Array.isArray(instance?.sounds) ? instance.sounds : [];
+    const bankNames = new Map(
+      (Array.isArray(instance?.banks) ? instance.banks : [])
+        .map((bank) => [bank.id, bank.name]),
+    );
+    const selected = sounds.find((sound) => sound.id === instance.selected_sound_id)
+      ?? sounds[0];
+    if (soundTitle && selected) soundTitle.textContent = selected.name;
+    if (soundSubtitle) {
+      soundSubtitle.textContent = selected?.detail
+        ?? (sounds.length > 1
+          ? `${sounds.length} sounds in the loaded bank.`
+          : "The default RackForge acoustic piano.");
+    }
+    if (playStatus) playStatus.textContent = sounds.length ? "READY" : "NO BANK";
+    soundBrowser.hidden = sounds.length < 2;
+    soundList.replaceChildren();
+    let currentBank;
+    for (const sound of sounds) {
+      if (sound.bank !== currentBank && bankNames.size > 1) {
+        currentBank = sound.bank;
+        const heading = document.createElement("span");
+        heading.className = "sound-bank";
+        heading.textContent = bankNames.get(sound.bank) ?? sound.bank ?? "Bank";
+        soundList.append(heading);
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "sound-entry";
+      button.textContent = sound.name;
+      if (sound.id === instance.selected_sound_id) button.classList.add("selected");
+      button.addEventListener("click", async () => {
+        for (const entry of soundList.children) entry.disabled = true;
+        try {
+          await hostRequest("plugin.select_sound", { sound_id: sound.id });
+          for (const entry of soundList.children) entry.classList.remove("selected");
+          button.classList.add("selected");
+          if (soundTitle) soundTitle.textContent = sound.name;
+        } catch (error) {
+          if (playStatus) {
+            playStatus.textContent =
+              error instanceof Error ? error.message : "Selection failed.";
+          }
+        } finally {
+          for (const entry of soundList.children) entry.disabled = false;
+        }
+      });
+      soundList.append(button);
+    }
+  };
+
+  const refreshVolume = () => {
+    if (!volume) return;
+    hostRequest("plugin.parameters", {})
+      .then((snapshot) => {
+        const value = snapshot?.values?.find((entry) => entry.index === 0);
+        if (value && Number.isFinite(value.value)) {
+          volume.disabled = false;
+          showVolume(value.value);
+        }
+      })
+      .catch(() => {
+        // A host without the volume parameter keeps the control disabled.
+      });
+  };
+
   window.addEventListener("message", (event) => {
     if (
       event.origin !== window.location.origin ||
@@ -37,8 +140,13 @@
       pending.delete(event.data.request_id);
       if (event.data.ok) request.resolve(event.data.result);
       else request.reject(new Error(event.data.error || "RackForge rejected the request."));
+    } else if (event.data.kind === "context" && event.data.instance) {
+      renderSounds(event.data.instance);
+      refreshVolume();
     }
   });
+
+  // CONFIG: user library browser -------------------------------------------
 
   const selectLibrary = document.querySelector("[data-select-library]");
   const selection = document.querySelector("[data-library-selection]");

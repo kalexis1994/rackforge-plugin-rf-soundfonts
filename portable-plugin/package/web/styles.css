@@ -13,6 +13,19 @@ header { border-bottom: 1px solid #35414c; }
 .status i { width: 8px; height: 8px; border-radius: 50%; background: #65d68a; box-shadow: 0 0 12px #65d68a; }
 h1 { margin: 18px 0 6px; font-size: clamp(38px, 7vw, 76px); font-weight: 650; letter-spacing: -.055em; }
 .subtitle { margin: 0; color: #97a6b3; font-size: clamp(14px, 2vw, 18px); }
+.volume-card { display: flex; align-items: center; gap: 18px; margin-top: 34px; padding: 16px 22px; border: 1px solid #35414c; background: #080d12; }
+.volume-card label { color: #8fa2b2; font: 700 11px ui-monospace, monospace; letter-spacing: .18em; }
+.volume-card input[type="range"] { flex: 1; accent-color: #70d8ff; }
+.volume-card input[type="range"]:disabled { opacity: .45; }
+.volume-card output { min-width: 46px; text-align: right; color: #b7c8d4; font: 13px ui-monospace, monospace; }
+.sound-browser { margin-top: 16px; padding: 20px 22px; border: 1px solid #273640; background: #080d12; }
+.sound-browser > strong { display: block; margin-bottom: 12px; font-size: 13px; letter-spacing: .04em; }
+.sound-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 6px; max-height: 320px; overflow-y: auto; }
+.sound-bank { grid-column: 1 / -1; margin-top: 8px; color: #8fa2b2; font: 700 11px ui-monospace, monospace; letter-spacing: .14em; }
+.sound-bank:first-child { margin-top: 0; }
+.sound-entry { min-height: 40px; padding: 0 12px; color: #b7c8d4; text-align: left; background: #101923; border: 1px solid #253642; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sound-entry:hover, .sound-entry.selected { color: #061018; background: #70d8ff; border-color: #70d8ff; }
+.sound-entry:disabled { opacity: .55; cursor: wait; }
 .keyboard { height: clamp(150px, 28vw, 285px); margin: clamp(30px, 6vw, 72px) -2px 0; display: flex; align-items: flex-start; filter: drop-shadow(0 -12px 22px #0008); }
 .keyboard i { display: block; }
 .keyboard .white { flex: 1; height: 100%; margin-right: 1px; border-radius: 0 0 5px 5px; background: linear-gradient(90deg, #c9d0d4, #fff 40%, #dce1e4); border: 1px solid #737d83; }

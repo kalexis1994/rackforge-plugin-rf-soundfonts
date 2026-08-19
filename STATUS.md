@@ -34,6 +34,9 @@ performance setups.
 
 - Native Plugin API 1.5 adapter for the dynamic library catalog.
 - Portable `wasm-v1` SoundFont component for Windows, Android and Raspberry Pi.
+- The portable component publishes a dynamic preset catalog for the loaded
+  SoundFont, selects presets per bank and patch, and exposes a master-volume
+  parameter with sample-accurate automation.
 - Read-only dynamic catalogs generated from installed libraries.
 - State version 4 stores master gain and the selected library sound.
 - State readers for versions 1 through 3. A version 3 Custom Program state is
@@ -52,16 +55,16 @@ performance setups.
 
 ## Current limitations
 
-- The native adapter and portable component do not yet expose identical dynamic
-  catalogs; the portable ABI still uses a static preset catalog.
+- The native adapter reads DLS and SFZ libraries; the portable component reads
+  SF2 SoundFonts. The two do not yet expose identical formats.
 - DLS-2 articulation coverage is partial.
 - Proprietary or encrypted library content may be rejected.
 - Large libraries still require ARM64 memory and CPU profiling.
 
 ## Next recommended milestone
 
-- Add portable dynamic-catalog support after a library resource is loaded.
-- Keep resource preparation outside the real-time callback.
+- Port the DLS and SFZ engine to the portable component so both runtimes play
+  the same libraries.
 - Run catalog, state and rendered-audio conformance tests across Windows,
   Android and Raspberry Pi.
 - Add redistributable fixture banks so CI can exercise the complete loading

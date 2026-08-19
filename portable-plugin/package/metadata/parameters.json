@@ -1,6 +1,30 @@
 {
   "schema_version": 1,
-  "pages": [],
-  "parameters": []
+  "pages": [
+    { "id": "sound", "name": "Sound", "order": 0, "header": "RF-Soundfonts" }
+  ],
+  "parameters": [
+    {
+      "index": 0,
+      "id": "master-volume",
+      "name": "Volume",
+      "page": "sound",
+      "order": 0,
+      "kind": {
+        "type": "float",
+        "minimum": 0.0,
+        "maximum": 1.0,
+        "default": 0.9,
+        "step": 0.01,
+        "unit": "x"
+      },
+      "flags": {
+        "automatable": true,
+        "modulatable": true,
+        "read_only": false,
+        "advanced": false
+      },
+      "suggested_control": "knob"
+    }
+  ]
 }
-

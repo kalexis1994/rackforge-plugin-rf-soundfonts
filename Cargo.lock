@@ -501,6 +501,7 @@ version = "0.2.1"
 dependencies = [
  "rackforge-plugin-sdk",
  "rustysynth",
+ "serde_json",
 ]
 
 [[package]]

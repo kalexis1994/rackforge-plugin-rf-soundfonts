@@ -11,12 +11,21 @@
     <main class="instrument">
       <header>
         <div class="identity"><span>RF</span><strong>SOUNDFONTS</strong></div>
-        <p>FACTORY LIBRARY · PORTABLE</p>
+        <p>SOUNDFONT LIBRARY · PORTABLE</p>
       </header>
       <section class="panel">
-        <div class="status"><i></i><span>READY</span></div>
-        <h1>YDP Grand Piano</h1>
-        <p class="subtitle">The default RackForge acoustic piano.</p>
+        <div class="status"><i></i><span data-play-status>READY</span></div>
+        <h1 data-sound-title>YDP Grand Piano</h1>
+        <p class="subtitle" data-sound-subtitle>The default RackForge acoustic piano.</p>
+        <div class="volume-card">
+          <label for="master-volume">VOLUME</label>
+          <input id="master-volume" type="range" min="0" max="1" step="0.01" value="0.9" data-volume disabled>
+          <output data-volume-value>—</output>
+        </div>
+        <div class="sound-browser" data-sound-browser hidden>
+          <strong>Sounds in this bank</strong>
+          <div class="sound-list" data-sound-list></div>
+        </div>
         <div class="keyboard" aria-hidden="true"></div>
       </section>
       <footer><span>96 VOICE POLYPHONY</span><span>FREEPATS · CC BY 3.0</span></footer>
@@ -24,4 +33,3 @@
     <script src="app.js" defer></script>
   </body>
 </html>
-
