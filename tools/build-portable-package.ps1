@@ -26,8 +26,22 @@ New-Item -ItemType Directory -Path $package -Force | Out-Null
 
 Push-Location $repoRoot
 try {
-    Invoke-WebRequest -Uri $sourceUrl -OutFile $source -MaximumRetryCount 3 -RetryIntervalSec 2
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -ne $sourceSha256) { throw 'YDP source archive checksum mismatch' }
+    # RF_SOUNDFONTS_CACHE keeps the verified upstream archive between builds,
+    # so packaging does not depend on freepats.zenvoid.org being reachable.
+    $cached = if ($env:RF_SOUNDFONTS_CACHE) {
+        Join-Path $env:RF_SOUNDFONTS_CACHE ([System.IO.Path]::GetFileName(([uri]$sourceUrl).AbsolutePath))
+    } else { $null }
+    if ($cached -and (Test-Path -LiteralPath $cached) -and
+        ((Get-FileHash -Algorithm SHA256 -LiteralPath $cached).Hash -eq $sourceSha256)) {
+        Copy-Item -LiteralPath $cached $source
+    } else {
+        Invoke-WebRequest -Uri $sourceUrl -OutFile $source -MaximumRetryCount 3 -RetryIntervalSec 2
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -ne $sourceSha256) { throw 'YDP source archive checksum mismatch' }
+        if ($cached) {
+            New-Item -ItemType Directory -Force (Split-Path $cached) | Out-Null
+            Copy-Item -LiteralPath $source $cached
+        }
+    }
     # On Windows, Git's MSYS tar can shadow the system one and treats `C:\...`
     # as a remote host; the System32 bsdtar handles Windows paths and bzip2.
     $tar = if ($IsWindows) { Join-Path $env:SystemRoot 'System32\tar.exe' } else { 'tar' }

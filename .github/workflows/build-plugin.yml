@@ -61,6 +61,12 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
           rustup default stable
 
+      - name: Cache the YDP source archive
+        uses: actions/cache@v4
+        with:
+          path: ydp-cache
+          key: ydp-grand-piano-sf2-20160804
+
       - name: Cache Cargo dependencies and build outputs
         uses: actions/cache@v4
         with:
@@ -88,6 +94,8 @@ jobs:
       - name: Build portable plugin package
         id: package
         shell: pwsh
+        env:
+          RF_SOUNDFONTS_CACHE: ${{ github.workspace }}/ydp-cache
         run: |
           $manifest = Get-Content -Raw portable-plugin/package/rackforge-plugin.toml
           if ($manifest -notmatch '(?m)^version = "([^"]+)"\s*$') {
