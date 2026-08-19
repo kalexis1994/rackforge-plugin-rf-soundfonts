@@ -45,7 +45,9 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
         )));
     }
     if info.sample_rate == 0 {
-        return Err(SoundfontError::Invalid(format!("FLAC {name:?} has no sample rate")));
+        return Err(SoundfontError::Invalid(format!(
+            "FLAC {name:?} has no sample rate"
+        )));
     }
     if !(1..=32).contains(&info.bits_per_sample) {
         return Err(SoundfontError::Unsupported(format!(
@@ -68,7 +70,9 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
     }
 
     if samples.is_empty() {
-        return Err(SoundfontError::Invalid(format!("FLAC {name:?} contains no audio")));
+        return Err(SoundfontError::Invalid(format!(
+            "FLAC {name:?} contains no audio"
+        )));
     }
     if samples.len() % info.channels as usize != 0 {
         return Err(SoundfontError::Invalid(format!(
@@ -77,9 +81,8 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
     }
 
     let frames = samples.len() / info.channels as usize;
-    let sample_loop = read_loop(bytes).filter(|looping| {
-        looping.start < looping.end && looping.end <= frames
-    });
+    let sample_loop =
+        read_loop(bytes).filter(|looping| looping.start < looping.end && looping.end <= frames);
 
     Ok(Wave {
         name,
@@ -116,8 +119,9 @@ fn read_loop(bytes: &[u8]) -> Option<crate::SampleLoop> {
         let header = bytes[cursor];
         let last = header & 0x80 != 0;
         let kind = header & 0x7f;
-        let length = u32::from_be_bytes([0, bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]])
-            as usize;
+        let length =
+            u32::from_be_bytes([0, bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]])
+                as usize;
         let body = cursor + 4;
         let end = body.checked_add(length)?;
         if end > bytes.len() {
@@ -154,7 +158,8 @@ mod tests {
     #[test]
     #[ignore = "requires a locally supplied FLAC sample"]
     fn decodes_a_real_sample() {
-        let path = std::env::var("RF_SOUNDFONTS_FLAC").expect("set RF_SOUNDFONTS_FLAC to a .flac file");
+        let path =
+            std::env::var("RF_SOUNDFONTS_FLAC").expect("set RF_SOUNDFONTS_FLAC to a .flac file");
         let wave = load_wave(&path).unwrap();
         eprintln!(
             "{}: {} Hz, {} channels, {} frames",

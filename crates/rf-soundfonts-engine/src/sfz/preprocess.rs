@@ -100,7 +100,9 @@ fn expand_line(
                 let (name, after) = take_token(after);
                 let (value, after) = take_token(after);
                 if name.is_empty() {
-                    return Err(SoundfontError::Invalid("#define is missing a macro name".into()));
+                    return Err(SoundfontError::Invalid(
+                        "#define is missing a macro name".into(),
+                    ));
                 }
                 // The value is substituted now so a macro defined in terms of
                 // another resolves against what was in scope at definition.
@@ -222,9 +224,7 @@ mod tests {
     fn a_macro_redefined_later_applies_only_from_that_point() {
         // The whole reason expansion runs in document order: each region in a
         // real library redefines $KEY before including the shared body.
-        let output = expand_str(
-            "#define $KEY 21 a=$KEY\n#define $KEY 96 b=$KEY",
-        );
+        let output = expand_str("#define $KEY 21 a=$KEY\n#define $KEY 96 b=$KEY");
         assert!(output.contains("a=21"), "{output}");
         assert!(output.contains("b=96"), "{output}");
     }
@@ -321,8 +321,7 @@ mod tests {
         fs::create_dir_all(directory.join("Data")).unwrap();
         fs::write(directory.join("Data/body.txt"), "volume=0").unwrap();
         let mut macros = BTreeMap::new();
-        let output =
-            expand_text("#include \"Data\\body.txt\"", &directory, &mut macros).unwrap();
+        let output = expand_text("#include \"Data\\body.txt\"", &directory, &mut macros).unwrap();
         assert!(output.contains("volume=0"), "{output}");
     }
 
@@ -353,10 +352,7 @@ mod tests {
         };
         let expanded = expand(Path::new(&path)).unwrap();
         assert!(!expanded.contains('$'), "unexpanded macros remain");
-        assert!(
-            !expanded.contains("#include"),
-            "unresolved include remains"
-        );
+        assert!(!expanded.contains("#include"), "unresolved include remains");
         let regions = expanded.matches("<region>").count();
         let samples = expanded.matches("sample=").count();
         assert!(regions > 0, "no regions were produced");

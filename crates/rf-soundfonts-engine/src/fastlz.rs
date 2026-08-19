@@ -162,9 +162,8 @@ impl Reader<'_> {
 
     /// The next byte, where its absence means the stream was cut short.
     fn byte(&mut self) -> Result<u8, SoundfontError> {
-        self.next().ok_or_else(|| {
-            SoundfontError::Invalid("FastLZ stream ends inside a reference".into())
-        })
+        self.next()
+            .ok_or_else(|| SoundfontError::Invalid("FastLZ stream ends inside a reference".into()))
     }
 
     fn take(&mut self, count: usize) -> Result<&[u8], SoundfontError> {

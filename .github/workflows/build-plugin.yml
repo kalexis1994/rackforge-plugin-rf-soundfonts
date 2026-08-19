@@ -58,7 +58,7 @@ jobs:
       - name: Set up Rust and WebAssembly target
         shell: pwsh
         run: |
-          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
           rustup default stable
 
       - name: Cache Cargo dependencies and build outputs
@@ -72,6 +72,14 @@ jobs:
           key: ${{ runner.os }}-rf-soundfonts-${{ hashFiles('rf-soundfonts/Cargo.lock', 'rackforge/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-rf-soundfonts-
+
+      - name: Check formatting
+        shell: pwsh
+        run: cargo fmt --all --check
+
+      - name: Lint workspace
+        shell: pwsh
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
       - name: Test workspace
         shell: pwsh

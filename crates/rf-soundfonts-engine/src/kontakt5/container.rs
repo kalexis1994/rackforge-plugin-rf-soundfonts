@@ -462,10 +462,12 @@ mod real_files {
                         continue;
                     }
                 };
-                let preset = item.find(PRESET_CHUNK_ITEM).map(|chunk| match &chunk.payload {
-                    Payload::Preset(data) => data.len(),
-                    _ => 0,
-                });
+                let preset = item
+                    .find(PRESET_CHUNK_ITEM)
+                    .map(|chunk| match &chunk.payload {
+                        Payload::Preset(data) => data.len(),
+                        _ => 0,
+                    });
                 eprintln!(
                     "{:34} arbol v{} chunks={} hijos={} preset={:?} cifrado={}",
                     path.file_name().unwrap().to_string_lossy(),
@@ -524,8 +526,14 @@ mod real_files {
                     for zone in program.zones.iter().take(2) {
                         eprintln!(
                             "         teclas {}..{} vel {}..{} raiz {} archivo {:?} {}Hz {}ch",
-                            zone.key_low, zone.key_high, zone.velocity_low, zone.velocity_high,
-                            zone.root_key, zone.file, zone.sample_rate, zone.channels,
+                            zone.key_low,
+                            zone.key_high,
+                            zone.velocity_low,
+                            zone.velocity_high,
+                            zone.root_key,
+                            zone.file,
+                            zone.sample_rate,
+                            zone.channels,
                         );
                     }
                 }

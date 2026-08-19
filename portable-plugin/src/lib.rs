@@ -68,7 +68,7 @@ fn parse_preset_id(id: &str) -> Option<(i32, i32)> {
 /// Sorts by bank and patch, drops duplicate locations, and caps the list, so
 /// the catalog and preset lookup agree on which entries exist.
 fn normalize_entries(mut entries: Vec<CatalogEntry>) -> Vec<CatalogEntry> {
-    entries.sort_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
+    entries.sort_by_key(|entry| (entry.0, entry.1));
     entries.dedup_by_key(|entry| (entry.0, entry.1));
     entries.truncate(MAX_CATALOG_PRESETS);
     entries
@@ -352,12 +352,11 @@ impl Processor for PortableSoundfonts {
         let selection = if id == LEGACY_PRESET_ID {
             entries.first().map(|entry| (entry.0, entry.1))
         } else {
-            parse_preset_id(id)
-                .filter(|(bank, patch)| {
-                    entries
-                        .iter()
-                        .any(|entry| entry.0 == *bank && entry.1 == *patch)
-                })
+            parse_preset_id(id).filter(|(bank, patch)| {
+                entries
+                    .iter()
+                    .any(|entry| entry.0 == *bank && entry.1 == *patch)
+            })
         };
         let Some(selection) = selection else {
             return false;
@@ -580,8 +579,7 @@ mod tests {
 
         let mut destination = vec![0u8; MAX_TRANSFER_BYTES];
         let length = plugin.write_preset_catalog(&mut destination).unwrap();
-        let catalog: serde_json::Value =
-            serde_json::from_slice(&destination[..length]).unwrap();
+        let catalog: serde_json::Value = serde_json::from_slice(&destination[..length]).unwrap();
         let first_id = catalog["presets"][0]["id"].as_str().unwrap().to_string();
         assert!(plugin.load_preset(&first_id));
         assert!(plugin.load_preset(LEGACY_PRESET_ID));

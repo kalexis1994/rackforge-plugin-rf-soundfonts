@@ -108,7 +108,14 @@ impl SampleStore {
         if workers <= 1 {
             return relatives
                 .iter()
-                .map(|relative| self.load_one(library_root, default_path, relative, resident.contains(relative)))
+                .map(|relative| {
+                    self.load_one(
+                        library_root,
+                        default_path,
+                        relative,
+                        resident.contains(relative),
+                    )
+                })
                 .collect();
         }
 
@@ -121,8 +128,7 @@ impl SampleStore {
                 let sender = sender.clone();
                 scope.spawn(move || {
                     for index in (worker..relatives.len()).step_by(workers) {
-                        let loaded =
-                            self.load_one(
+                        let loaded = self.load_one(
                             library_root,
                             default_path,
                             &relatives[index],
@@ -363,7 +369,9 @@ mod tests {
     #[test]
     fn clearing_an_absent_cache_is_not_an_error() {
         let root = temp_root();
-        SampleStore::new(root.join("never-created")).clear().unwrap();
+        SampleStore::new(root.join("never-created"))
+            .clear()
+            .unwrap();
     }
 
     #[test]
@@ -373,7 +381,9 @@ mod tests {
             .map(|index| write_source(&root, &format!("voice{index}.wav"), 256 + index * 8))
             .collect();
         let store = SampleStore::beside(&root);
-        let loaded = store.load_all(&root, "", &names, &Default::default()).unwrap();
+        let loaded = store
+            .load_all(&root, "", &names, &Default::default())
+            .unwrap();
         assert_eq!(loaded.len(), names.len());
         for (index, sample) in loaded.iter().enumerate() {
             assert_eq!(sample.name, names[index], "results came back reordered");
@@ -387,14 +397,23 @@ mod tests {
         let mut names = vec![write_source(&root, "good.wav", 128)];
         names.push("missing.wav".to_string());
         let store = SampleStore::beside(&root);
-        assert!(store.load_all(&root, "", &names, &Default::default()).is_err());
+        assert!(
+            store
+                .load_all(&root, "", &names, &Default::default())
+                .is_err()
+        );
     }
 
     #[test]
     fn an_empty_request_is_not_an_error() {
         let root = temp_root();
         let store = SampleStore::beside(&root);
-        assert!(store.load_all(&root, "", &[], &Default::default()).unwrap().is_empty());
+        assert!(
+            store
+                .load_all(&root, "", &[], &Default::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Checks every cached sample against the file it was made from.
@@ -410,7 +429,8 @@ mod tests {
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn audits_every_cached_sample() {
-        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
+        let path =
+            std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let path = Path::new(&path);
         let root = path.parent().unwrap_or(Path::new("."));
         let expanded = crate::sfz::preprocess::expand(path).unwrap();
@@ -434,13 +454,11 @@ mod tests {
         let mut suspects = Vec::new();
 
         for relative in &relatives {
-            let source = crate::sample::load(&crate::sample::resolve(
-                root,
-                &default_path,
-                relative,
-            ))
-            .unwrap();
-            let loaded = store.load_one(root, &default_path, relative, false).unwrap();
+            let source =
+                crate::sample::load(crate::sample::resolve(root, &default_path, relative)).unwrap();
+            let loaded = store
+                .load_one(root, &default_path, relative, false)
+                .unwrap();
 
             if loaded.frame_count != source.frame_count() {
                 suspects.push(format!(
@@ -474,7 +492,11 @@ mod tests {
             // Steps this large do not occur inside recorded piano audio.
             let mut worst_step = 0.0_f32;
             let mut step_at = 0;
-            for (index, pair) in out.chunks_exact(channels).collect::<Vec<_>>().windows(2).enumerate()
+            for (index, pair) in out
+                .chunks_exact(channels)
+                .collect::<Vec<_>>()
+                .windows(2)
+                .enumerate()
             {
                 let step = (pair[1][0] - pair[0][0]).abs();
                 if step > worst_step {
@@ -511,7 +533,8 @@ mod tests {
     fn measures_a_real_library() {
         use std::time::Instant;
 
-        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
+        let path =
+            std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let path = Path::new(&path);
         let root = path.parent().unwrap_or(Path::new("."));
 
@@ -532,15 +555,15 @@ mod tests {
 
         let store = SampleStore::beside(root);
         let started = Instant::now();
-        let samples = store.load_all(root, &default_path, &relatives, &Default::default()).unwrap();
+        let samples = store
+            .load_all(root, &default_path, &relatives, &Default::default())
+            .unwrap();
         let elapsed = started.elapsed();
 
         let resident: usize = samples.iter().map(StreamedSample::resident_bytes).sum();
         let whole: usize = samples
             .iter()
-            .map(|sample| {
-                sample.frame_count * usize::from(sample.channels) * size_of::<f32>()
-            })
+            .map(|sample| sample.frame_count * usize::from(sample.channels) * size_of::<f32>())
             .sum();
         let streaming = samples
             .iter()

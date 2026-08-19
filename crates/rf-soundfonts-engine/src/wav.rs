@@ -13,7 +13,7 @@
 //! loader that ignored `smpl` would play those sustained instruments as
 //! one-shots that stop mid-note.
 
-use crate::{SoundfontError, SampleLoop, Wave};
+use crate::{SampleLoop, SoundfontError, Wave};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -62,12 +62,16 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
         )));
     }
     if spec.sample_rate == 0 {
-        return Err(SoundfontError::Invalid(format!("WAV {name:?} has no sample rate")));
+        return Err(SoundfontError::Invalid(format!(
+            "WAV {name:?} has no sample rate"
+        )));
     }
 
     let samples = decode_samples(reader, &name)?;
     if samples.is_empty() {
-        return Err(SoundfontError::Invalid(format!("WAV {name:?} contains no audio")));
+        return Err(SoundfontError::Invalid(format!(
+            "WAV {name:?} contains no audio"
+        )));
     }
     if samples.len() % usize::from(spec.channels) != 0 {
         return Err(SoundfontError::Invalid(format!(
@@ -79,9 +83,8 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
     // A loop that runs past the audio is treated as absent rather than fatal:
     // truncated markers are common in converted libraries, and refusing the
     // file would lose an instrument over metadata the renderer can do without.
-    let sample_loop = read_smpl_loop(bytes).filter(|looping| {
-        looping.start < looping.end && looping.end <= frames
-    });
+    let sample_loop = read_smpl_loop(bytes)
+        .filter(|looping| looping.start < looping.end && looping.end <= frames);
 
     Ok(Wave {
         name,
@@ -193,12 +196,12 @@ fn decode_plain_pcm(bytes: &[u8], name: &str) -> Option<Wave> {
             ((value << shift) >> shift) as f32 * scale
         })
         .collect();
-    if samples.is_empty() || samples.len() % usize::from(channels) != 0 {
+    if samples.is_empty() || !samples.len().is_multiple_of(usize::from(channels)) {
         return None;
     }
     let frames = samples.len() / usize::from(channels);
-    let sample_loop =
-        read_smpl_loop(bytes).filter(|looping| looping.start < looping.end && looping.end <= frames);
+    let sample_loop = read_smpl_loop(bytes)
+        .filter(|looping| looping.start < looping.end && looping.end <= frames);
 
     Some(Wave {
         name: name.to_string(),
@@ -272,7 +275,10 @@ mod tests {
     fn decodes_stereo_and_keeps_frames_interleaved() {
         // Kept below full scale: +1.0 is one step past what a signed 16-bit
         // sample can hold, and the writer rejects it.
-        let bytes = write_wav(spec(2, 16, hound::SampleFormat::Int), &[0.5, -0.5, 0.5, -0.5]);
+        let bytes = write_wav(
+            spec(2, 16, hound::SampleFormat::Int),
+            &[0.5, -0.5, 0.5, -0.5],
+        );
         let wave = decode(&bytes, "stereo".into()).unwrap();
         assert_eq!(wave.channels, 2);
         assert_eq!(wave.frame_count(), 2, "frames must not count each channel");
@@ -304,7 +310,12 @@ mod tests {
     #[test]
     fn a_file_without_smpl_reports_no_loop() {
         let bytes = write_wav(spec(1, 16, hound::SampleFormat::Int), &[0.1, 0.2, 0.3]);
-        assert!(decode(&bytes, "dry".into()).unwrap().sample_params.is_none());
+        assert!(
+            decode(&bytes, "dry".into())
+                .unwrap()
+                .sample_params
+                .is_none()
+        );
     }
 
     #[test]
@@ -323,7 +334,10 @@ mod tests {
         let mut bytes = write_wav(spec(1, 16, hound::SampleFormat::Int), &[0.0; 4]);
         append_smpl(&mut bytes, 0, 99);
         let wave = decode(&bytes, "bad-loop".into()).unwrap();
-        assert!(wave.sample_params.is_none(), "instrument was lost to metadata");
+        assert!(
+            wave.sample_params.is_none(),
+            "instrument was lost to metadata"
+        );
     }
 
     #[test]

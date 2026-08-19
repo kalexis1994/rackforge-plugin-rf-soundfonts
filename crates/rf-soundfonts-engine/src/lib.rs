@@ -1,14 +1,14 @@
-pub mod kontakt5;
 pub mod fastlz;
-pub mod nki;
-pub mod smpl;
-pub mod streamer;
-pub mod spsc;
-pub mod sample_store;
-pub mod pcm_cache;
 pub mod flac;
+pub mod kontakt5;
+pub mod nki;
+pub mod pcm_cache;
 pub mod sample;
+pub mod sample_store;
 pub mod sfz;
+pub mod smpl;
+pub mod spsc;
+pub mod streamer;
 pub mod wav;
 
 use std::fs;
@@ -113,7 +113,9 @@ fn parse_chunks(
     depth: usize,
 ) -> Result<Vec<Chunk>, SoundfontError> {
     if depth > 12 {
-        return Err(SoundfontError::Invalid("RIFF nesting exceeds 12 levels".into()));
+        return Err(SoundfontError::Invalid(
+            "RIFF nesting exceeds 12 levels".into(),
+        ));
     }
     let mut chunks = Vec::new();
     let mut cursor = start;
@@ -584,7 +586,9 @@ impl DlsBank {
         let pool_header = u32_at(pool, 0) as usize;
         let cue_count = u32_at(pool, 4) as usize;
         if pool_header < 8 || pool_header + cue_count.saturating_mul(4) > pool.len() {
-            return Err(SoundfontError::Invalid("ptbl cue table is truncated".into()));
+            return Err(SoundfontError::Invalid(
+                "ptbl cue table is truncated".into(),
+            ));
         }
         let cues = (0..cue_count)
             .map(|index| u32_at(pool, pool_header + index * 4) as usize)
@@ -605,7 +609,9 @@ impl DlsBank {
                 .payload_start
                 .checked_sub(12)
                 .and_then(|start| start.checked_sub(wave_pool_start))
-                .ok_or_else(|| SoundfontError::Invalid("wave pool relative offset underflows".into()))?;
+                .ok_or_else(|| {
+                    SoundfontError::Invalid("wave pool relative offset underflows".into())
+                })?;
             waves_by_offset.insert(relative, parse_wave(wave, bytes)?);
         }
         let waves = cues
@@ -673,7 +679,9 @@ fn parse_wave(chunk: &Chunk, bytes: &[u8]) -> Result<Wave, SoundfontError> {
         .ok_or_else(|| SoundfontError::Invalid("wave is missing data".into()))?
         .data(bytes);
     if raw.len() % 2 != 0 {
-        return Err(SoundfontError::Invalid("PCM16 wave has an odd data size".into()));
+        return Err(SoundfontError::Invalid(
+            "PCM16 wave has an odd data size".into(),
+        ));
     }
     let samples = raw
         .chunks_exact(2)
@@ -1126,8 +1134,7 @@ impl Voice {
         // curve is allowed to pull the level down, so 0.0 leaves a
         // pre-layered sample at its recorded loudness.
         let tracking = config.velocity_tracking.clamp(0.0, 1.0);
-        let velocity_gain =
-            1.0 - tracking + tracking * (f32::from(velocity) / 127.0).powf(0.7);
+        let velocity_gain = 1.0 - tracking + tracking * (f32::from(velocity) / 127.0).powf(0.7);
         Ok(Self {
             note,
             samples: Arc::clone(&wave.samples),
@@ -1215,7 +1222,9 @@ impl Voice {
         if self.is_finished() {
             return [0.0, 0.0];
         }
-        let end = self.sample_loop.map_or(self.frame_count, |looping| looping.end);
+        let end = self
+            .sample_loop
+            .map_or(self.frame_count, |looping| looping.end);
         // A sample that simply runs out must not cut mid-waveform. Material
         // recorded to decay ends near silence and costs nothing here, but a
         // looped library is cut at its loop point instead: 94 of the 130
@@ -1870,14 +1879,27 @@ mod tests {
             frames += 1;
         }
         assert!(voice.is_finished(), "the voice never ended");
-        assert!(previous.abs() < 0.01, "it stopped at {previous}, which is a click");
-        assert!(worst_step < 0.05, "a step of {worst_step} remains at the end");
+        assert!(
+            previous.abs() < 0.01,
+            "it stopped at {previous}, which is a click"
+        );
+        assert!(
+            worst_step < 0.05,
+            "a step of {worst_step} remains at the end"
+        );
     }
 
     #[test]
     fn a_looping_sample_is_not_faded_at_its_loop_point() {
         // The declick must not mistake a loop for the end of the audio.
-        let bank = stereo_fixture(1, vec![0.5; 2_000], Some(SampleLoop { start: 0, end: 1_000 }));
+        let bank = stereo_fixture(
+            1,
+            vec![0.5; 2_000],
+            Some(SampleLoop {
+                start: 0,
+                end: 1_000,
+            }),
+        );
         let mut voice = fixture_voice(&bank, 0.0);
         for _ in 0..4_000 {
             voice.next_frame();

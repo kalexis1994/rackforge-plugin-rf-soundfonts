@@ -303,10 +303,9 @@ mod tests {
 
     #[test]
     fn a_region_inherits_from_group_master_and_global() {
-        let document = parse(
-            "<global> volume=-6\n<master> pan=10\n<group> lovel=1\n<region> sample=a.wav",
-        )
-        .unwrap();
+        let document =
+            parse("<global> volume=-6\n<master> pan=10\n<group> lovel=1\n<region> sample=a.wav")
+                .unwrap();
         let region = &document.regions[0];
         assert_eq!(region["volume"], "-6");
         assert_eq!(region["pan"], "10");
@@ -315,8 +314,7 @@ mod tests {
 
     #[test]
     fn a_region_overrides_what_it_inherits() {
-        let document =
-            parse("<group> volume=-6\n<region> sample=a.wav volume=0").unwrap();
+        let document = parse("<group> volume=-6\n<region> sample=a.wav volume=0").unwrap();
         assert_eq!(document.regions[0]["volume"], "0");
     }
 
@@ -359,8 +357,7 @@ mod tests {
 
     #[test]
     fn control_opcodes_stay_out_of_the_regions() {
-        let document =
-            parse("<control> default_path=Samples/\n<region> sample=a.wav").unwrap();
+        let document = parse("<control> default_path=Samples/\n<region> sample=a.wav").unwrap();
         assert_eq!(document.control["default_path"], "Samples/");
         assert!(!document.regions[0].contains_key("default_path"));
     }
@@ -373,8 +370,7 @@ mod tests {
 
     #[test]
     fn headers_and_opcodes_share_a_line() {
-        let document =
-            parse("<region> lokey=95 hikey=97 <region> lokey=98 hikey=100").unwrap();
+        let document = parse("<region> lokey=95 hikey=97 <region> lokey=98 hikey=100").unwrap();
         assert_eq!(document.regions.len(), 2);
         assert_eq!(document.regions[1]["lokey"], "98");
     }
@@ -387,8 +383,7 @@ mod tests {
 
     #[test]
     fn a_curve_is_collected_by_its_index() {
-        let document =
-            parse("<curve> curve_index=7 v000=1 v127=0\n<region> sample=a.wav").unwrap();
+        let document = parse("<curve> curve_index=7 v000=1 v127=0\n<region> sample=a.wav").unwrap();
         let curve = &document.curves[&7];
         assert_eq!(curve.value(0.0), 1.0);
         assert_eq!(curve.value(1.0), 0.0);
@@ -430,7 +425,8 @@ mod tests {
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn parses_a_real_library() {
-        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
+        let path =
+            std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let expanded = super::super::preprocess::expand(std::path::Path::new(&path)).unwrap();
         let document = parse(&expanded).unwrap();
 
@@ -446,8 +442,11 @@ mod tests {
         for (name, count) in &vocabulary {
             eprintln!("  {name} ({count})");
         }
-        assert!(document.regions.iter().all(|region| {
-            region.contains_key("sample")
-        }));
+        assert!(
+            document
+                .regions
+                .iter()
+                .all(|region| { region.contains_key("sample") })
+        );
     }
 }

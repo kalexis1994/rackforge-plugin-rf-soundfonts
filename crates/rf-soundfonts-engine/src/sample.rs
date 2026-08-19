@@ -75,9 +75,15 @@ mod tests {
 
     #[test]
     fn spaces_in_a_sample_name_survive_resolution() {
-        let resolved = resolve(Path::new("/lib"), "Samples/", "HEADROOM PIANO LEVEL1 CLOSE 60.flac");
+        let resolved = resolve(
+            Path::new("/lib"),
+            "Samples/",
+            "HEADROOM PIANO LEVEL1 CLOSE 60.flac",
+        );
         assert!(
-            resolved.to_string_lossy().contains("HEADROOM PIANO LEVEL1 CLOSE 60.flac"),
+            resolved
+                .to_string_lossy()
+                .contains("HEADROOM PIANO LEVEL1 CLOSE 60.flac"),
             "{resolved:?}"
         );
     }

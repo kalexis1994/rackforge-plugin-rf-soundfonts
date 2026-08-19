@@ -19,10 +19,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::sfz::parse::{Curve, OpcodeMap, SfzDocument};
 use crate::sample_store::{SampleStore, StreamedSample};
+use crate::sfz::parse::{Curve, OpcodeMap, SfzDocument};
 use crate::streamer::Streamer;
-use crate::{SoundfontError, EnvelopeSpec, SampleParams, Voice, VoiceConfig};
+use crate::{EnvelopeSpec, SampleParams, SoundfontError, Voice, VoiceConfig};
 
 /// Controller values, normalised to `0.0..=1.0`.
 ///
@@ -36,9 +36,7 @@ pub struct CcState {
 
 impl Default for CcState {
     fn default() -> Self {
-        Self {
-            values: [0.0; 128],
-        }
+        Self { values: [0.0; 128] }
     }
 }
 
@@ -295,7 +293,10 @@ impl SampledInstrument {
 
     /// Bytes of memory the instrument holds resident.
     pub fn resident_bytes(&self) -> usize {
-        self.samples.iter().map(StreamedSample::resident_bytes).sum()
+        self.samples
+            .iter()
+            .map(StreamedSample::resident_bytes)
+            .sum()
     }
 
     /// What this instrument is, in the few numbers worth showing a player.
@@ -487,7 +488,11 @@ fn control_defaults(control: &OpcodeMap) -> CcState {
 }
 
 fn region_from(opcodes: &OpcodeMap, wave_index: usize, sample: &StreamedSample) -> SampledRegion {
-    let number = |name: &str| opcodes.get(name).and_then(|value| value.parse::<f32>().ok());
+    let number = |name: &str| {
+        opcodes
+            .get(name)
+            .and_then(|value| value.parse::<f32>().ok())
+    };
     let key = |name: &str| opcodes.get(name).and_then(|value| parse_note(value));
 
     let key_low = key("lokey").unwrap_or(0);
@@ -757,7 +762,10 @@ mod tests {
         );
         let mut cc = CcState::default();
         cc.set(74, 0.0);
-        assert!(!region.accepts(60, 100, &cc), "a closed gate let a note through");
+        assert!(
+            !region.accepts(60, 100, &cc),
+            "a closed gate let a note through"
+        );
         cc.set(74, 1.0);
         assert!(region.accepts(60, 100, &cc));
     }
@@ -861,7 +869,11 @@ mod tests {
     #[test]
     fn group_volume_and_volume_both_reach_the_level() {
         let region = region_from(
-            &opcodes(&[("sample", "a.flac"), ("group_volume", "-6"), ("volume", "-6")]),
+            &opcodes(&[
+                ("sample", "a.flac"),
+                ("group_volume", "-6"),
+                ("volume", "-6"),
+            ]),
             0,
             &silent_wave(8),
         );
@@ -922,11 +934,7 @@ mod tests {
     #[test]
     fn a_loop_end_names_the_last_frame_inside_the_loop() {
         let region = region_from(
-            &opcodes(&[
-                ("sample", "a.flac"),
-                ("loop_start", "2"),
-                ("loop_end", "5"),
-            ]),
+            &opcodes(&[("sample", "a.flac"), ("loop_start", "2"), ("loop_end", "5")]),
             0,
             &silent_wave(8),
         );
@@ -1000,7 +1008,8 @@ mod tests {
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn finds_discontinuities_in_a_held_note() {
-        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
+        let path =
+            std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let note: u8 = std::env::var("RF_DLS_NOTE")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -1024,9 +1033,14 @@ mod tests {
         }
 
         let starved: usize = voices.iter().map(Voice::starved_frames).sum();
-        let peak = output.iter().fold(0.0_f32, |peak, value| peak.max(value.abs()));
+        let peak = output
+            .iter()
+            .fold(0.0_f32, |peak, value| peak.max(value.abs()));
         eprintln!("note {note}, {} voices, peak {peak:.4}", voices.len());
-        eprintln!("resident head ends near {:.1} ms", 32_768.0 / 44_100.0 * 1000.0);
+        eprintln!(
+            "resident head ends near {:.1} ms",
+            32_768.0 / 44_100.0 * 1000.0
+        );
         eprintln!("starved frames: {starved}");
 
         // A click is a step that stands out from its surroundings, not one
@@ -1068,16 +1082,15 @@ mod tests {
     #[test]
     #[ignore = "requires a locally supplied SFZ library"]
     fn loads_and_plays_a_real_library() {
-        let path = std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
+        let path =
+            std::env::var("RF_SOUNDFONTS_SFZ").expect("set RF_SOUNDFONTS_SFZ to an .sfz file");
         let started = std::time::Instant::now();
         let instrument = SampledInstrument::open(&path).unwrap();
         let load = started.elapsed();
         let whole: usize = instrument
             .samples
             .iter()
-            .map(|sample| {
-                sample.frame_count * usize::from(sample.channels) * size_of::<f32>()
-            })
+            .map(|sample| sample.frame_count * usize::from(sample.channels) * size_of::<f32>())
             .sum();
         eprintln!(
             "{}: {} regions, {} distinct samples",

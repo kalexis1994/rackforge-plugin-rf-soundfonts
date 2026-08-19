@@ -44,7 +44,9 @@ pub fn open(path: impl AsRef<Path>) -> Result<(SampledInstrument, Vec<String>), 
 
     let mut reports = Vec::new();
     if skipped_zones > 0 {
-        reports.push(format!("{name}: {skipped_zones} zones had no usable mapping"));
+        reports.push(format!(
+            "{name}: {skipped_zones} zones had no usable mapping"
+        ));
     }
 
     // Every audio file within reach, indexed by name folded to one case.
@@ -156,7 +158,9 @@ fn region_from(
         // How long a stolen voice takes to get out of the way. It follows the
         // note's own release, but only so far: a nine-second tail on every
         // displaced voice would pile them up faster than they retire.
-        off_time: envelope.release_seconds.clamp(MINIMUM_RELEASE_SECONDS, 0.05),
+        off_time: envelope
+            .release_seconds
+            .clamp(MINIMUM_RELEASE_SECONDS, 0.05),
         envelope,
         // A loop reaching past the audio is dropped rather than trusted: the
         // recorded length belongs to the file the author had, and a converted
@@ -211,7 +215,9 @@ fn index_audio_files(root: &Path) -> BTreeMap<String, String> {
                 if !is_audio {
                     continue;
                 }
-                let Some(name) = path.file_name().map(|name| name.to_string_lossy().into_owned())
+                let Some(name) = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
                 else {
                     continue;
                 };
@@ -285,13 +291,21 @@ mod tests {
     #[test]
     fn a_halved_level_becomes_six_decibels_down() {
         let region = region_from(&zone(0.5, 1.0), 0, &whole(1_000), None);
-        assert!((region.volume_db + 6.02).abs() < 0.05, "{}", region.volume_db);
+        assert!(
+            (region.volume_db + 6.02).abs() < 0.05,
+            "{}",
+            region.volume_db
+        );
     }
 
     #[test]
     fn a_doubled_ratio_becomes_an_octave_of_cents() {
         let region = region_from(&zone(1.0, 2.0), 0, &whole(1_000), None);
-        assert!((region.tune_cents - 1_200.0).abs() < 0.1, "{}", region.tune_cents);
+        assert!(
+            (region.tune_cents - 1_200.0).abs() < 0.1,
+            "{}",
+            region.tune_cents
+        );
     }
 
     #[test]
@@ -315,7 +329,11 @@ mod tests {
             start: 10,
             end: 9_999,
         });
-        assert!(region_from(&source, 0, &whole(1_000), None).sample_loop.is_none());
+        assert!(
+            region_from(&source, 0, &whole(1_000), None)
+                .sample_loop
+                .is_none()
+        );
     }
 
     #[test]
@@ -325,7 +343,11 @@ mod tests {
             start: 100,
             end: 900,
         });
-        assert!(region_from(&source, 0, &whole(1_000), None).sample_loop.is_some());
+        assert!(
+            region_from(&source, 0, &whole(1_000), None)
+                .sample_loop
+                .is_some()
+        );
     }
 
     #[test]
@@ -391,7 +413,11 @@ mod tests {
             end: 55_489,
         });
         let streamed = sample(60_000, crate::sample_store::PRELOAD_FRAMES);
-        assert!(region_from(&source, 0, &streamed, None).sample_loop.is_none());
+        assert!(
+            region_from(&source, 0, &streamed, None)
+                .sample_loop
+                .is_none()
+        );
     }
 
     #[test]
@@ -493,8 +519,18 @@ mod tests {
                     instrument.name,
                     instrument.regions.len(),
                     instrument.resident_bytes() / 1_048_576,
-                    1000.0 * instrument.regions.iter().map(|r| r.envelope.release_seconds).fold(f32::MAX, f32::min),
-                    1000.0 * instrument.regions.iter().map(|r| r.envelope.release_seconds).fold(0.0, f32::max),
+                    1000.0
+                        * instrument
+                            .regions
+                            .iter()
+                            .map(|r| r.envelope.release_seconds)
+                            .fold(f32::MAX, f32::min),
+                    1000.0
+                        * instrument
+                            .regions
+                            .iter()
+                            .map(|r| r.envelope.release_seconds)
+                            .fold(0.0, f32::max),
                     voices.len(),
                 );
                 assert!(!voices.is_empty(), "{} played nothing", instrument.name);

@@ -122,9 +122,9 @@ pub fn write(path: &Path, wave: &Wave, format: CacheFormat) -> Result<CacheHeade
         prologue.extend_from_slice(&format.tag().to_le_bytes());
         prologue.extend_from_slice(&(header.frame_count as u64).to_le_bytes());
         // A loop of 0..0 means none, which no real loop can be.
-        let (loop_start, loop_end) = header
-            .sample_loop
-            .map_or((0_u64, 0_u64), |looping| (looping.start as u64, looping.end as u64));
+        let (loop_start, loop_end) = header.sample_loop.map_or((0_u64, 0_u64), |looping| {
+            (looping.start as u64, looping.end as u64)
+        });
         prologue.extend_from_slice(&loop_start.to_le_bytes());
         prologue.extend_from_slice(&loop_end.to_le_bytes());
         prologue.resize(HEADER_BYTES as usize, 0);
@@ -169,7 +169,9 @@ pub fn read_header(file: &mut File) -> Result<CacheHeader, SoundfontError> {
             source,
         })?;
     if &bytes[0..8] != MAGIC {
-        return Err(SoundfontError::Invalid("PCM cache has the wrong magic".into()));
+        return Err(SoundfontError::Invalid(
+            "PCM cache has the wrong magic".into(),
+        ));
     }
     let word = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
     if word(8) != VERSION {

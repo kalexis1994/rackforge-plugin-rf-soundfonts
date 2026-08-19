@@ -33,10 +33,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crate::SoundfontError;
 use crate::pcm_cache::{self, CacheHeader};
 use crate::sample_store::StreamedSample;
 use crate::spsc::SpscRing;
-use crate::SoundfontError;
 
 /// Frames each stream buffers ahead. About 0.74 s at 44.1 kHz.
 pub const STREAM_RING_FRAMES: usize = 32_768;
@@ -171,7 +171,6 @@ impl Streamer {
     /// Every ring is allocated here so that claiming a stream later, on the
     /// audio thread, touches no allocator.
     pub fn start() -> Self {
-
         let slots: Vec<Arc<Slot>> = (0..MAX_STREAMS)
             .map(|_| {
                 Arc::new(Slot {
@@ -440,7 +439,6 @@ pub struct StreamWindow {
 impl StreamWindow {
     /// Wraps a reader that resumes at `first_streamed_frame`.
     pub fn new(reader: StreamReader, channels: usize, first_streamed_frame: usize) -> Self {
-
         Self {
             reader,
             channels,
@@ -528,7 +526,11 @@ impl StreamWindow {
 }
 
 /// Reads a stream to its end, for tests and offline rendering.
-pub fn drain(reader: &StreamReader, out: &mut Vec<f32>, limit: usize) -> Result<(), SoundfontError> {
+pub fn drain(
+    reader: &StreamReader,
+    out: &mut Vec<f32>,
+    limit: usize,
+) -> Result<(), SoundfontError> {
     let mut block = [0.0_f32; 1024];
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while out.len() < limit {
@@ -551,8 +553,8 @@ pub fn drain(reader: &StreamReader, out: &mut Vec<f32>, limit: usize) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcm_cache::CacheFormat;
     use crate::Wave;
+    use crate::pcm_cache::CacheFormat;
     use std::fs;
     use std::path::Path;
 

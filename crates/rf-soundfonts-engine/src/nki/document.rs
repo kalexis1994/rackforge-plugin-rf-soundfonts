@@ -258,10 +258,16 @@ pub fn parse(text: &str) -> Result<(NkiDocument, usize), SoundfontError> {
                 for attribute in element.attributes().flatten() {
                     match attribute.key.as_ref() {
                         b"name" => {
-                            name = attribute.unescape_value().ok().map(|text| text.into_owned())
+                            name = attribute
+                                .unescape_value()
+                                .ok()
+                                .map(|text| text.into_owned())
                         }
                         b"value" => {
-                            value = attribute.unescape_value().ok().map(|text| text.into_owned())
+                            value = attribute
+                                .unescape_value()
+                                .ok()
+                                .map(|text| text.into_owned())
                         }
                         _ => {}
                     }
@@ -333,8 +339,18 @@ fn value_pair(element: &quick_xml::events::BytesStart<'_>) -> (Option<String>, O
     #[allow(deprecated)]
     for attribute in element.attributes().flatten() {
         match attribute.key.as_ref() {
-            b"name" => name = attribute.unescape_value().ok().map(|text| text.into_owned()),
-            b"value" => value = attribute.unescape_value().ok().map(|text| text.into_owned()),
+            b"name" => {
+                name = attribute
+                    .unescape_value()
+                    .ok()
+                    .map(|text| text.into_owned())
+            }
+            b"value" => {
+                value = attribute
+                    .unescape_value()
+                    .ok()
+                    .map(|text| text.into_owned())
+            }
             _ => {}
         }
     }
@@ -410,7 +426,9 @@ fn zone_from(values: &BTreeMap<String, String>) -> Option<NkiZone> {
         pan: number("zonePan").unwrap_or(0.0).clamp(-1.0, 1.0),
         // Kontakt stores tuning as a ratio; anything at or below zero would
         // stop the sample dead, so it is treated as unset.
-        tune: number("zoneTune").filter(|ratio| *ratio > 0.0).unwrap_or(1.0),
+        tune: number("zoneTune")
+            .filter(|ratio| *ratio > 0.0)
+            .unwrap_or(1.0),
         sample_loop,
     })
 }
@@ -429,10 +447,7 @@ fn sample_name(raw: &str) -> Option<String> {
     }
     // Segment names may contain slashes on neither platform, so the last of
     // either separator is a safe boundary for a plainly written path too.
-    let tail = trimmed
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(trimmed);
+    let tail = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
     // The serialised form has no separator, so fall back to the last position
     // where a known audio extension ends and walk back to the segment start.
     let name = strip_length_prefix(tail);
@@ -859,7 +874,12 @@ mod tests {
                     panic!("{}: {error}", path.display());
                 });
 
-                let lowest = document.zones.iter().map(|zone| zone.key_low).min().unwrap();
+                let lowest = document
+                    .zones
+                    .iter()
+                    .map(|zone| zone.key_low)
+                    .min()
+                    .unwrap();
                 let highest = document
                     .zones
                     .iter()
@@ -881,7 +901,11 @@ mod tests {
                     looped
                 );
                 for zone in &document.zones {
-                    assert!(!zone.sample.contains('@'), "path marker survived: {}", zone.sample);
+                    assert!(
+                        !zone.sample.contains('@'),
+                        "path marker survived: {}",
+                        zone.sample
+                    );
                     assert!(zone.key_low <= zone.key_high);
                     assert!(zone.root_key <= 127);
                     assert!(zone.volume.is_finite() && zone.tune > 0.0);

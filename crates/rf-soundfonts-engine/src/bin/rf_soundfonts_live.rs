@@ -214,8 +214,8 @@ mod linux {
     }
 
     fn open_midi_input() -> Result<(Receiver<MidiEvent>, midir::MidiInputConnection<()>)> {
-        let mut midi_input =
-            MidiInput::new("RF-Soundfonts MIDI input").context("could not initialize MIDI input")?;
+        let mut midi_input = MidiInput::new("RF-Soundfonts MIDI input")
+            .context("could not initialize MIDI input")?;
         midi_input.ignore(Ignore::None);
 
         let ports = midi_input.ports();
