@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/kalexis1994/rackforge-plugin-rf-soundfonts"
@@ -21,7 +21,9 @@ thiserror = "2.0"
 rustysynth = { version = "1.3.6", default-features = false }
 
 # RackForge's portable SDK crates are pinned to the exact host revision used
-# to build this release. Contributors can override them with the adjacent
-# local checkout through `.cargo/config.toml`; see `.cargo/config.toml.example`.
-rackforge-plugin-api = { git = "https://github.com/kalexis1994/rackforge.git", rev = "136960b3dd7748865b6a0a3d43af9c69bbcdea16" }
-rackforge-plugin-sdk = { git = "https://github.com/kalexis1994/rackforge.git", rev = "cd6b5a889b9d29eac857bdf452ad9a5ae102b9e0" }
+# to build this release. The same revision is checked out by CI and must match
+# `.github/workflows/build-plugin.yml`. Contributors can override them with the
+# adjacent local checkout through `.cargo/config.toml`; see
+# `.cargo/config.toml.example`.
+rackforge-plugin-api = { git = "https://github.com/kalexis1994/rackforge.git", rev = "81b94f12d55f577f13c4fc2af272ff9f4210d0cc" }
+rackforge-plugin-sdk = { git = "https://github.com/kalexis1994/rackforge.git", rev = "81b94f12d55f577f13c4fc2af272ff9f4210d0cc" }

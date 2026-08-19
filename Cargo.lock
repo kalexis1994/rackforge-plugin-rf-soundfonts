@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "rackforge-midi-api"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "serde",
  "thiserror 2.0.19",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "rackforge-plugin-api"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "rackforge-midi-api",
  "rackforge-program-api",
@@ -472,11 +472,11 @@ dependencies = [
 
 [[package]]
 name = "rackforge-plugin-sdk"
-version = "0.1.0"
+version = "0.1.2"
 
 [[package]]
 name = "rackforge-program-api"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "semver",
  "serde",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "rackforge-rf-soundfonts"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "hound",
  "rackforge-plugin-api",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "rackforge-rf-soundfonts-portable"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "rackforge-plugin-sdk",
  "rustysynth",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "rf-soundfonts"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "alsa",
  "anyhow",

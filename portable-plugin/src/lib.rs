@@ -261,5 +261,20 @@ mod tests {
         assert!(!plugin.begin_resource("other", 1));
         assert!(!plugin.load_preset("other"));
     }
+
+    #[test]
+    fn package_metadata_matches_the_crate_version() {
+        let version = env!("CARGO_PKG_VERSION");
+        let manifest = include_str!("../package/rackforge-plugin.toml");
+        assert!(
+            manifest.contains(&format!("version = \"{version}\"")),
+            "rackforge-plugin.toml version must match the crate version {version}"
+        );
+        let runtime = include_str!("../package/metadata/runtime.json");
+        assert!(
+            runtime.contains(&format!("\"version\": \"{version}\"")),
+            "runtime.json version must match the crate version {version}"
+        );
+    }
 }
 

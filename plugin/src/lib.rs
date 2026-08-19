@@ -31,12 +31,17 @@ const DEFAULT_MASTER_GAIN: f32 = 0.65;
 const MAX_VOICES: usize = 32;
 const LEGACY_STATE_SIZE: usize = 16;
 
-const RUNTIME_DESCRIPTOR: &[u8] = br#"{
+const RUNTIME_DESCRIPTOR: &[u8] = concat!(
+    r#"{
   "schema_version": 1,
   "id": "org.rackforge.rf-soundfonts",
-  "version": "0.1.0",
+  "version": ""#,
+    env!("CARGO_PKG_VERSION"),
+    r#"",
   "state_version": 4
-}"#;
+}"#
+)
+.as_bytes();
 
 const PARAMETER_SCHEMA: &[u8] = br#"{
   "schema_version": 1,
@@ -1291,6 +1296,18 @@ mod tests {
         Wave,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn package_manifest_matches_the_crate_version() {
+        let version = env!("CARGO_PKG_VERSION");
+        let manifest = include_str!("../package/rackforge-plugin.toml");
+        assert!(
+            manifest.contains(&format!("version = \"{version}\"")),
+            "rackforge-plugin.toml version must match the crate version {version}"
+        );
+        let descriptor: serde_json::Value = serde_json::from_slice(RUNTIME_DESCRIPTOR).unwrap();
+        assert_eq!(descriptor["version"], version);
+    }
 
     fn synthetic_plugin() -> RfDls {
         let samples = (0..512)
