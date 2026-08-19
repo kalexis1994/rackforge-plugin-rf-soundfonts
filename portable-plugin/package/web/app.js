@@ -203,6 +203,7 @@
               for (const current of libraryEntries.children) current.classList.remove("selected");
               button.classList.add("selected");
               selection.textContent = `Playing bank: ${entry.name}`;
+              refreshInstalled();
             } catch (error) {
               selection.textContent = error instanceof Error ? error.message : "Bank could not be installed.";
             } finally {
@@ -239,15 +240,45 @@
     kind: "ready",
   }, window.location.origin);
 
-  if (selection) {
+  const factoryCard = document.querySelector("[data-factory-card]");
+  const clearBank = document.querySelector("[data-clear-bank]");
+  const refreshInstalled = () => {
+    if (!factoryCard) return;
     hostRequest("plugin.resource_status", {})
       .then((statuses) => {
         const user = statuses.find((status) => status.resource_id === "user-soundfont");
-        if (user?.installed) selection.textContent = "A user bank is installed.";
+        factoryCard.hidden = !user?.installed;
+        if (user?.installed && selection?.textContent === "No folder selected.") {
+          selection.textContent = "A user bank is installed.";
+        }
       })
       .catch(() => {
         // Status is informational only.
       });
+  };
+  clearBank?.addEventListener("click", async () => {
+    clearBank.disabled = true;
+    try {
+      await hostRequest("plugin.clear_resource", {
+        target_resource_id: "user-soundfont",
+      });
+      factoryCard.hidden = true;
+      if (selection) selection.textContent = "Playing the factory piano.";
+      if (libraryEntries) {
+        for (const entry of libraryEntries.children) entry.classList.remove("selected");
+      }
+    } catch (error) {
+      if (selection) {
+        selection.textContent =
+          error instanceof Error ? error.message : "Bank could not be cleared.";
+      }
+    } finally {
+      clearBank.disabled = false;
+    }
+  });
+
+  if (selection) {
+    refreshInstalled();
     hostRequest("plugin.resource_bindings", {})
       .then((grants) => {
         const grant = grants.find((candidate) => candidate.resource_id === "user-library");
