@@ -39,6 +39,15 @@ kind = "file"
 required = true
 package_path = "assets/ydp-grand-piano.sf2"
 
+# Installed into private plugin storage; resources are delivered in id order,
+# so this bank arrives after the factory one and becomes the playing bank.
+[[resources]]
+id = "user-soundfont"
+name = "User SoundFont"
+kind = "file"
+required = false
+data_path = "banks/user-soundfont.sf2"
+
 [[resources]]
 id = "user-library"
 name = "SoundFont library"

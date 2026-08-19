@@ -192,10 +192,11 @@
         } else {
           button.addEventListener("click", async () => {
             for (const current of libraryEntries.children) current.disabled = true;
-            selection.textContent = `Loading ${entry.name}…`;
+            selection.textContent = `Installing ${entry.name}…`;
             try {
-              await hostRequest("plugin.load_resource", {
-                target_resource_id: "factory-soundfont",
+              // Install rather than load, so the bank survives restarts.
+              await hostRequest("plugin.install_resource", {
+                target_resource_id: "user-soundfont",
                 grant_id: grant.grant_id,
                 entry_id: entry.id,
               });
@@ -203,7 +204,7 @@
               button.classList.add("selected");
               selection.textContent = `Playing bank: ${entry.name}`;
             } catch (error) {
-              selection.textContent = error instanceof Error ? error.message : "Bank could not be loaded.";
+              selection.textContent = error instanceof Error ? error.message : "Bank could not be installed.";
             } finally {
               for (const current of libraryEntries.children) current.disabled = false;
             }
@@ -239,6 +240,14 @@
   }, window.location.origin);
 
   if (selection) {
+    hostRequest("plugin.resource_status", {})
+      .then((statuses) => {
+        const user = statuses.find((status) => status.resource_id === "user-soundfont");
+        if (user?.installed) selection.textContent = "A user bank is installed.";
+      })
+      .catch(() => {
+        // Status is informational only.
+      });
     hostRequest("plugin.resource_bindings", {})
       .then((grants) => {
         const grant = grants.find((candidate) => candidate.resource_id === "user-library");

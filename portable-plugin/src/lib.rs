@@ -4,6 +4,8 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 const RESOURCE_ID: &str = "factory-soundfont";
+/// Persistent user bank; delivered after the factory one, so it wins.
+const USER_RESOURCE_ID: &str = "user-soundfont";
 /// Sound id published by releases up to 0.2.1, kept so saved racks restore.
 const LEGACY_PRESET_ID: &str = "factory.ydp-grand-piano";
 const MAX_BANK_BYTES: usize = 128 * 1024 * 1024;
@@ -283,7 +285,7 @@ impl Processor for PortableSoundfonts {
         let Ok(expected_bytes) = usize::try_from(total_bytes) else {
             return false;
         };
-        if id != RESOURCE_ID
+        if (id != RESOURCE_ID && id != USER_RESOURCE_ID)
             || expected_bytes == 0
             || expected_bytes > MAX_BANK_BYTES
             || self.pending.is_some()
@@ -471,6 +473,14 @@ mod tests {
         assert!(!plugin.begin_resource("other", 1));
         assert!(!plugin.load_preset("other"));
         assert!(!plugin.load_preset("sf.b000.p000"));
+    }
+
+    #[test]
+    fn accepts_both_declared_bank_resources() {
+        let mut plugin = PortableSoundfonts::default();
+        assert!(plugin.begin_resource(RESOURCE_ID, 4));
+        let mut plugin = PortableSoundfonts::default();
+        assert!(plugin.begin_resource(USER_RESOURCE_ID, 4));
     }
 
     #[test]

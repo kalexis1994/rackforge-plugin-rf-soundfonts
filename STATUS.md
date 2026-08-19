@@ -37,6 +37,9 @@ performance setups.
 - The portable component publishes a dynamic preset catalog for the loaded
   SoundFont, selects presets per bank and patch, and exposes a master-volume
   parameter with sample-accurate automation.
+- A user bank chosen in CONFIG is installed into private plugin storage
+  (`user-soundfont`), so it survives restarts and is delivered to every new
+  instance after the factory bank.
 - Read-only dynamic catalogs generated from installed libraries.
 - State version 4 stores master gain and the selected library sound.
 - State readers for versions 1 through 3. A version 3 Custom Program state is
