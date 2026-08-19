@@ -64,8 +64,9 @@
           showLibrary(grant, previous, ancestors.slice(0, -1)));
         libraryEntries.append(back);
       }
+      // RustySynth rejects SF3 (compressed) banks, so only offer what loads.
       const visible = entries.filter((entry) =>
-        entry.kind === "directory" || /\.(sf2|sf3)$/i.test(entry.name));
+        entry.kind === "directory" || /\.sf2$/i.test(entry.name));
       if (!visible.length) {
         const empty = document.createElement("span");
         empty.textContent = "No SoundFont files found in this folder.";
