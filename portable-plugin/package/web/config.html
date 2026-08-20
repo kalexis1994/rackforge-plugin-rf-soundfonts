@@ -3,37 +3,57 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#090c10">
+    <meta name="theme-color" content="#091413">
     <title>RF-Soundfonts configuration</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
-    <main class="instrument config-instrument">
+    <main class="instrument">
       <header>
         <div class="identity"><span>RF</span><strong>SOUNDFONTS</strong></div>
         <p>LIBRARY SETTINGS</p>
       </header>
-      <section class="panel config-panel">
-        <span class="status"><i></i><span>RACKFORGE STORAGE</span></span>
+      <section class="panel">
+        <div class="status"><i></i><span>RACKFORGE STORAGE</span></div>
         <h1>Sound library</h1>
-        <p class="subtitle">Authorize a folder containing your SoundFont collection. RackForge owns access to the folder on every platform.</p>
-        <div class="library-card">
-          <div>
-            <strong>User library</strong>
-            <span data-library-selection>No folder selected.</span>
-          </div>
-          <button type="button" data-select-library>Select folder</button>
+        <p class="subtitle">RackForge owns access to your folders on every platform.</p>
+        <div class="tabs" role="tablist" aria-label="Library settings sections">
+          <button class="tab" type="button" role="tab" id="tab-library"
+                  aria-controls="panel-library" aria-selected="true" data-tab="library">Library</button>
+          <button class="tab" type="button" role="tab" id="tab-bank"
+                  aria-controls="panel-bank" aria-selected="false" tabindex="-1" data-tab="bank">User bank</button>
         </div>
-        <div class="library-files" data-library-files hidden>
-          <strong>SoundFonts in this folder</strong>
-          <div data-library-entries></div>
-        </div>
-        <div class="library-card" data-factory-card hidden>
-          <div>
-            <strong>Installed user bank</strong>
-            <span>Replaces the factory piano on every start.</span>
-          </div>
-          <button type="button" data-clear-bank>Restore factory bank</button>
+        <div class="tabpanels">
+          <section class="tabpanel" role="tabpanel" id="panel-library"
+                   aria-labelledby="tab-library" data-panel="library" data-active>
+            <div class="library-card">
+              <div>
+                <strong>Source folder</strong>
+                <span data-library-selection>No folder selected.</span>
+              </div>
+              <button type="button" data-select-library>Select folder</button>
+            </div>
+            <div class="library-files" data-library-files hidden>
+              <strong>SoundFonts in this folder</strong>
+              <div data-library-entries></div>
+            </div>
+          </section>
+          <section class="tabpanel" role="tabpanel" id="panel-bank"
+                   aria-labelledby="tab-bank" data-panel="bank" hidden>
+            <div class="bank-card" data-factory-card hidden>
+              <div>
+                <strong>Installed user bank</strong>
+                <span>Replaces the factory piano on every start.</span>
+              </div>
+              <button type="button" data-clear-bank>Restore factory bank</button>
+            </div>
+            <div class="bank-card" data-no-bank>
+              <div>
+                <strong>No user bank installed</strong>
+                <span>The factory YDP Grand Piano is playing. Install one from the Library tab.</span>
+              </div>
+            </div>
+          </section>
         </div>
       </section>
       <footer><span>HOST-MANAGED ACCESS</span><span>NO NATIVE PATH EXPOSED</span></footer>

@@ -20,3 +20,5 @@
 *.flac binary
 *.dls binary
 *.pcm binary
+*.sf2 binary
+*.ttf binary

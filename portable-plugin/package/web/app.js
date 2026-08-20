@@ -10,6 +10,31 @@
     }
   }
 
+  // Tabs, so a surface never grows a page scrollbar inside the host frame.
+  const tabs = [...document.querySelectorAll("[role=tab]")];
+  const showTab = (name) => {
+    for (const tab of tabs) {
+      const selected = tab.dataset.tab === name;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      const panel = document.querySelector(`[data-panel="${tab.dataset.tab}"]`);
+      if (!panel) continue;
+      panel.hidden = !selected;
+      panel.toggleAttribute("data-active", selected);
+    }
+  };
+  for (const [index, tab] of tabs.entries()) {
+    tab.addEventListener("click", () => showTab(tab.dataset.tab));
+    tab.addEventListener("keydown", (event) => {
+      const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      if (!step) return;
+      event.preventDefault();
+      const next = tabs[(index + step + tabs.length) % tabs.length];
+      showTab(next.dataset.tab);
+      next.focus();
+    });
+  }
+
   const pending = new Map();
   let requestSerial = 0;
   const hostRequest = (method, params) =>
@@ -71,14 +96,22 @@
       ?? sounds[0];
     if (soundTitle && selected) soundTitle.textContent = selected.name;
     if (soundSubtitle) {
-      soundSubtitle.textContent = selected?.detail
-        ?? (sounds.length > 1
-          ? `${sounds.length} sounds in the loaded bank.`
-          : "The default RackForge acoustic piano.");
+      // A lone unnamed sound keeps whatever line the page shipped with, which
+      // still describes the factory bank correctly.
+      if (selected?.detail) soundSubtitle.textContent = selected.detail;
+      else if (sounds.length > 1) {
+        soundSubtitle.textContent = `${sounds.length} sounds in the loaded bank.`;
+      }
     }
     if (playStatus) playStatus.textContent = sounds.length ? "READY" : "NO BANK";
-    soundBrowser.hidden = sounds.length < 2;
     soundList.replaceChildren();
+    if (!sounds.length) {
+      const empty = document.createElement("span");
+      empty.className = "sound-bank";
+      empty.textContent = "No bank loaded.";
+      soundList.append(empty);
+      return;
+    }
     let currentBank;
     for (const sound of sounds) {
       if (sound.bank !== currentBank && bankNames.size > 1) {
@@ -241,16 +274,18 @@
   }, window.location.origin);
 
   const factoryCard = document.querySelector("[data-factory-card]");
+  const noBankCard = document.querySelector("[data-no-bank]");
   const clearBank = document.querySelector("[data-clear-bank]");
+  const showInstalled = (installed) => {
+    if (factoryCard) factoryCard.hidden = !installed;
+    if (noBankCard) noBankCard.hidden = installed;
+  };
   const refreshInstalled = () => {
     if (!factoryCard) return;
     hostRequest("plugin.resource_status", {})
       .then((statuses) => {
         const user = statuses.find((status) => status.resource_id === "user-soundfont");
-        factoryCard.hidden = !user?.installed;
-        if (user?.installed && selection?.textContent === "No folder selected.") {
-          selection.textContent = "A user bank is installed.";
-        }
+        showInstalled(Boolean(user?.installed));
       })
       .catch(() => {
         // Status is informational only.
@@ -262,7 +297,7 @@
       await hostRequest("plugin.clear_resource", {
         target_resource_id: "user-soundfont",
       });
-      factoryCard.hidden = true;
+      showInstalled(false);
       if (selection) selection.textContent = "Playing the factory piano.";
       if (libraryEntries) {
         for (const entry of libraryEntries.children) entry.classList.remove("selected");

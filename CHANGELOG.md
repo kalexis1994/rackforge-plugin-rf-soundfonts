@@ -7,6 +7,12 @@ plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
 ### Added
 
+- The surfaces have their own visual identity — a dark green instrument
+  faceplate set in Strait — so the plugin reads as separately installed
+  software rather than as part of the RackForge shell.
+- PLAY and CONFIG are organised into tabs inside a fixed frame. Neither
+  surface scrolls the page any more; only a long list scrolls, inside its own
+  panel.
 - The plugin publishes every preset of the loaded SoundFont as a dynamic
   catalog, grouped by bank, and plays the one you select. Saved racks that
   referenced the old factory preset id still restore.
