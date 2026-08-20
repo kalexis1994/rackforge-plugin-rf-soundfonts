@@ -3,7 +3,7 @@
 All user-visible changes to the RF-Soundfonts plugin. Versions follow the
 plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-08-20
 
 ### Added
 
