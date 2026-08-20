@@ -3,6 +3,53 @@
 All user-visible changes to the RF-Soundfonts plugin. Versions follow the
 plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
+## 0.4.1 — 2026-08-20
+
+### Changed
+
+- PLAY and CONFIG now use a more modern glass treatment with layered blur,
+  translucent surfaces, luminous borders, restrained aurora gradients and
+  stronger depth between the browser, bank stage and controls.
+- Tabs, search, bank cards, buttons, range controls and selection states gained
+  consistent gradient highlights and clearer interactive feedback.
+- The bank-owned palette still drives the instrument area, so the new visual
+  system enriches each bank rather than replacing its identity.
+
+## 0.4.0 — 2026-08-20
+
+### Added
+
+- PLAY is now a safe bank-presentation renderer. A bank profile owns its image,
+  palette, copy, layout and visible modules while the browser and host controls
+  remain stable.
+- The factory YDP bank ships its presentation manifest and artwork together in
+  `web/banks/ydp-grand-piano/`; unknown SoundFonts use a neutral fallback.
+- Dynamic catalog bank names identify factory and user sources, preventing one
+  bank's visual profile from leaking into another bank with a similar preset
+  name.
+
+### Changed
+
+- The YDP factory view uses its recording-studio artwork as a cinematic bank
+  stage rather than making every loaded SoundFont share the same sampler skin.
+
+## 0.3.1 — 2026-08-20
+
+### Added
+
+- PLAY now uses an original sampler-workstation layout: a persistent searchable
+  sound browser, loaded-instrument rack, channel output control and performance
+  keyboard remain visible together.
+- The interface adapts to narrow and short host frames without page scrolling.
+
+### Fixed
+
+- Host requests time out cleanly instead of leaving controls busy forever.
+- Rapid folder navigation ignores stale responses, library entries are sorted,
+  and only compatible `.sf2` banks are offered.
+- Restoring the factory bank now requires a second confirmation and installed
+  and factory status cards are strictly mutually exclusive.
+
 ## 0.3.0 — 2026-08-20
 
 ### Added

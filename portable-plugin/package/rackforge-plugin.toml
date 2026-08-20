@@ -1,13 +1,21 @@
-schema_version = 1
+schema_version = 2
 id = "org.rackforge.rf-soundfonts"
 name = "RF-Soundfonts"
 vendor = "RackForge"
-version = "0.3.0"
+version = "0.4.1"
+description = "A portable instrument for playing and browsing SoundFont libraries, with a factory grand piano ready to perform."
 kind = "instrument"
 state_version = 1
 capabilities = ["audio_output", "midi_input", "presets", "sample_accurate_automation"]
 ui_layouts = ["little@1"]
 config_mode = true
+
+[branding]
+icon = "branding/icon.png"
+banner = "branding/banner.png"
+splash = "branding/splash.png"
+background_color = "#091413"
+accent_color = "#B0E4CC"
 
 [midi]
 channel_model = "single_part"

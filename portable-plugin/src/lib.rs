@@ -21,8 +21,26 @@ const PERCUSSION_CHANNEL: i32 = 9;
 const DRUM_BANK_OFFSET: i32 = 128;
 
 struct PendingResource {
+    source: BankSource,
     expected_bytes: usize,
     bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BankSource {
+    Factory,
+    User,
+}
+
+impl BankSource {
+    fn bank_name(self, bank: i32) -> String {
+        match self {
+            Self::Factory if bank == 0 => "YDP Grand Piano".into(),
+            Self::Factory => format!("YDP Grand Piano · Bank {bank}"),
+            Self::User if bank >= DRUM_BANK_OFFSET => format!("User SoundFont · Drums {bank}"),
+            Self::User => format!("User SoundFont · Bank {bank}"),
+        }
+    }
 }
 
 /// One playable SoundFont preset: bank number, patch number, display name.
@@ -32,6 +50,7 @@ struct PortableSoundfonts {
     sound_font: Option<Arc<SoundFont>>,
     synth: Option<Synthesizer>,
     pending: Option<PendingResource>,
+    active_source: Option<BankSource>,
     sample_rate: i32,
     selected: Option<(i32, i32)>,
     master_volume: f64,
@@ -45,6 +64,7 @@ impl Default for PortableSoundfonts {
             sound_font: None,
             synth: None,
             pending: None,
+            active_source: None,
             sample_rate: 48_000,
             selected: None,
             master_volume: DEFAULT_MASTER_VOLUME,
@@ -76,7 +96,7 @@ fn normalize_entries(mut entries: Vec<CatalogEntry>) -> Vec<CatalogEntry> {
     entries
 }
 
-fn build_catalog_json(entries: &[CatalogEntry]) -> Vec<u8> {
+fn build_catalog_json(entries: &[CatalogEntry], source: BankSource) -> Vec<u8> {
     let mut banks: Vec<i32> = entries.iter().map(|entry| entry.0).collect();
     banks.dedup();
     let banks_json: Vec<serde_json::Value> = banks
@@ -85,11 +105,7 @@ fn build_catalog_json(entries: &[CatalogEntry]) -> Vec<u8> {
         .map(|(order, bank)| {
             serde_json::json!({
                 "id": format!("b{bank:03}"),
-                "name": if *bank >= DRUM_BANK_OFFSET {
-                    format!("Drums {bank}")
-                } else {
-                    format!("Bank {bank}")
-                },
+                "name": source.bank_name(*bank),
                 "order": order as i32,
             })
         })
@@ -121,9 +137,13 @@ fn build_catalog_json(entries: &[CatalogEntry]) -> Vec<u8> {
 
 /// Serializes the catalog into `destination`, halving the preset list until
 /// it fits rather than publishing nothing for an oversized bank.
-fn fit_catalog(mut entries: Vec<CatalogEntry>, destination: &mut [u8]) -> Option<usize> {
+fn fit_catalog(
+    mut entries: Vec<CatalogEntry>,
+    source: BankSource,
+    destination: &mut [u8],
+) -> Option<usize> {
     loop {
-        let bytes = build_catalog_json(&entries);
+        let bytes = build_catalog_json(&entries, source);
         if bytes.len() <= destination.len() {
             destination[..bytes.len()].copy_from_slice(&bytes);
             return Some(bytes.len());
@@ -285,11 +305,12 @@ impl Processor for PortableSoundfonts {
         let Ok(expected_bytes) = usize::try_from(total_bytes) else {
             return false;
         };
-        if (id != RESOURCE_ID && id != USER_RESOURCE_ID)
-            || expected_bytes == 0
-            || expected_bytes > MAX_BANK_BYTES
-            || self.pending.is_some()
-        {
+        let source = match id {
+            RESOURCE_ID => BankSource::Factory,
+            USER_RESOURCE_ID => BankSource::User,
+            _ => return false,
+        };
+        if expected_bytes == 0 || expected_bytes > MAX_BANK_BYTES || self.pending.is_some() {
             return false;
         }
         let mut bytes = Vec::new();
@@ -297,6 +318,7 @@ impl Processor for PortableSoundfonts {
             return false;
         }
         self.pending = Some(PendingResource {
+            source,
             expected_bytes,
             bytes,
         });
@@ -338,12 +360,17 @@ impl Processor for PortableSoundfonts {
             }
         }
         self.sound_font = Some(sound_font);
+        self.active_source = Some(pending.source);
         self.rebuild_synth()
     }
 
     fn write_preset_catalog(&mut self, destination: &mut [u8]) -> Option<usize> {
         let sound_font = self.sound_font.as_ref()?;
-        fit_catalog(Self::catalog_entries(sound_font), destination)
+        fit_catalog(
+            Self::catalog_entries(sound_font),
+            self.active_source.unwrap_or(BankSource::Factory),
+            destination,
+        )
     }
 
     fn load_preset(&mut self, id: &str) -> bool {
@@ -519,15 +546,19 @@ mod tests {
 
     #[test]
     fn catalog_json_is_valid_and_named() {
-        let bytes = build_catalog_json(&[
-            (0, 0, "Grand Piano".into()),
-            (0, 1, "   ".into()),
-            (128, 0, "Standard Kit".into()),
-        ]);
+        let bytes = build_catalog_json(
+            &[
+                (0, 0, "Grand Piano".into()),
+                (0, 1, "   ".into()),
+                (128, 0, "Standard Kit".into()),
+            ],
+            BankSource::Factory,
+        );
         let catalog: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(catalog["schema_version"], 1);
         assert_eq!(catalog["banks"][0]["id"], "b000");
-        assert_eq!(catalog["banks"][1]["name"], "Drums 128");
+        assert_eq!(catalog["banks"][0]["name"], "YDP Grand Piano");
+        assert_eq!(catalog["banks"][1]["name"], "YDP Grand Piano · Bank 128");
         assert_eq!(catalog["presets"][0]["id"], "sf.b000.p000");
         assert_eq!(catalog["presets"][0]["name"], "Grand Piano");
         assert_eq!(catalog["presets"][1]["name"], "Preset 0:001");
@@ -540,11 +571,12 @@ mod tests {
             .map(|index| (0, index, format!("Preset number {index}")))
             .collect();
         let mut small = [0u8; 2048];
-        let length = fit_catalog(entries.clone(), &mut small).unwrap();
+        let length = fit_catalog(entries.clone(), BankSource::User, &mut small).unwrap();
         let catalog: serde_json::Value = serde_json::from_slice(&small[..length]).unwrap();
         assert!(catalog["presets"].as_array().unwrap().len() < entries.len());
+        assert_eq!(catalog["banks"][0]["name"], "User SoundFont · Bank 0");
         let mut tiny = [0u8; 8];
-        assert_eq!(fit_catalog(entries, &mut tiny), None);
+        assert_eq!(fit_catalog(entries, BankSource::User, &mut tiny), None);
     }
 
     #[test]

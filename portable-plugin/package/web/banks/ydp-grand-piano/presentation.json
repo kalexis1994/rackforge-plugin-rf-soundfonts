@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "ydp-grand-piano",
+  "match": {
+    "bank_name_contains": ["ydp grand"]
+  },
+  "layout": "cinematic",
+  "theme": {
+    "ground": "#08110f",
+    "surface": "#10231f",
+    "accent": "#c8ead9",
+    "structure": "#568f79"
+  },
+  "artwork": "banks/ydp-grand-piano/artwork.png",
+  "artwork_alt": "A grand piano in a dark green recording studio",
+  "copy": {
+    "edition": "YDP GRAND · FACTORY EDITION",
+    "kicker": "ACOUSTIC GRAND",
+    "control_kicker": "PIANO OUTPUT",
+    "control_title": "Performance",
+    "engine": "RUSTYSYNTH · 96 VOICES",
+    "footer": "YDP GRAND PIANO",
+    "credit": "FREEPATS · CC BY 3.0"
+  },
+  "modules": ["artwork", "instrument", "controls", "keyboard"],
+  "keyboard": true
+}

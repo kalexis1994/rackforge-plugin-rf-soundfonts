@@ -39,14 +39,25 @@ SoundFonts:
 2. Browse the authorized folder and pick a `.sf2` file. RackForge installs it
    into the plugin's private storage, so it keeps playing after a restart.
    Compressed `.sf3` banks are not supported.
-3. The **PLAY** surface lists every preset in the loaded bank, grouped by
-   bank number. Pick a sound with one tap and set the master volume; the
-   volume is also automatable from the rack.
-4. **Restore factory bank** in CONFIG removes the installed bank and returns
-   to the factory piano.
+3. The **PLAY** surface keeps a stable browser and performance frame, while the
+   active bank supplies the artwork, palette, wording and supported internal
+   composition of its instrument stage. Banks without a presentation manifest
+   receive a neutral SoundFont fallback instead of inheriting another bank's
+   identity.
+4. **Restore factory bank** in CONFIG uses a two-step confirmation before
+   removing the installed bank and returning to the factory piano.
 
 Freely licensed SoundFonts are available from
 [FreePats](https://freepats.zenvoid.org/) and other community collections.
+
+## Bank-owned presentation
+
+PLAY is a constrained renderer rather than one hard-coded instrument skin.
+Each packaged bank owns a `presentation.json` and its visual assets under
+`web/banks/<bank-id>/`; `web/bank-presentations.json` only discovers those
+profiles. The schema offers a bounded set of layouts and modules, so a bank can
+look and read differently without injecting HTML, CSS or JavaScript. See
+[`docs/BANK_PRESENTATIONS.md`](docs/BANK_PRESENTATIONS.md) for the contract.
 
 ## Repository layout
 
@@ -97,7 +108,7 @@ tooling without deploy keys or repository secrets.
 
 ## Compatibility
 
-RF-Soundfonts `0.3.0` targets RackForge Plugin API `1.7`, the portable
+RF-Soundfonts `0.4.1` targets RackForge Plugin API `1.7`, the portable
 `wasm-v1` runtime, and the `little@1` controller surface. RackForge SDK sources
 and package tooling remain pinned to tested Git revisions for reproducible
 builds.

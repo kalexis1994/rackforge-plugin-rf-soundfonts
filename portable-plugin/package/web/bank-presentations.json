@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "fallback": {
+    "layout": "studio",
+    "theme": {
+      "ground": "#091413",
+      "surface": "#0d1f1c",
+      "accent": "#b0e4cc",
+      "structure": "#408a71"
+    },
+    "copy": {
+      "edition": "SOUNDFONT BANK",
+      "kicker": "LOADED INSTRUMENT",
+      "control_kicker": "CHANNEL",
+      "control_title": "Output",
+      "engine": "WASM · 96 VOICES",
+      "footer": "RACKFORGE INSTRUMENT",
+      "credit": "SF2 · PORTABLE"
+    },
+    "modules": ["instrument", "controls", "keyboard"],
+    "keyboard": true
+  },
+  "profiles": ["banks/ydp-grand-piano/presentation.json"]
+}

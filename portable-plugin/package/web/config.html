@@ -14,7 +14,7 @@
         <p>LIBRARY SETTINGS</p>
       </header>
       <section class="panel">
-        <div class="status"><i></i><span>RACKFORGE STORAGE</span></div>
+        <div class="status"><i></i><span data-config-status>RACKFORGE STORAGE</span></div>
         <h1>Sound library</h1>
         <p class="subtitle">RackForge owns access to your folders on every platform.</p>
         <div class="tabs" role="tablist" aria-label="Library settings sections">
@@ -29,12 +29,15 @@
             <div class="library-card">
               <div>
                 <strong>Source folder</strong>
-                <span data-library-selection>No folder selected.</span>
+                <span data-library-selection role="status" aria-live="polite">No folder selected.</span>
               </div>
               <button type="button" data-select-library>Select folder</button>
             </div>
             <div class="library-files" data-library-files hidden>
-              <strong>SoundFonts in this folder</strong>
+              <div class="library-files-heading">
+                <strong>SoundFonts in this folder</strong>
+                <span data-library-path>Library root</span>
+              </div>
               <div data-library-entries></div>
             </div>
           </section>
@@ -42,10 +45,10 @@
                    aria-labelledby="tab-bank" data-panel="bank" hidden>
             <div class="bank-card" data-factory-card hidden>
               <div>
-                <strong>Installed user bank</strong>
-                <span>Replaces the factory piano on every start.</span>
+                <strong data-installed-bank-name>Installed user bank</strong>
+                <span data-installed-bank-detail>Replaces the factory piano on every start.</span>
               </div>
-              <button type="button" data-clear-bank>Restore factory bank</button>
+              <button type="button" class="danger-action" data-clear-bank>Restore factory bank</button>
             </div>
             <div class="bank-card" data-no-bank>
               <div>
