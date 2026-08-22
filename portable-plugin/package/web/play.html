@@ -7,42 +7,95 @@
     <title>RF-Soundfonts</title>
     <link rel="stylesheet" href="styles.css">
   </head>
-  <body>
-    <main class="instrument">
+  <body class="play-surface">
+    <main class="instrument workstation">
       <header>
         <div class="identity"><span>RF</span><strong>SOUNDFONTS</strong></div>
-        <p>SOUNDFONT LIBRARY · PORTABLE</p>
+        <p>PORTABLE SAMPLE WORKSTATION</p>
       </header>
-      <section class="panel">
-        <div class="status"><i></i><span data-play-status>READY</span></div>
-        <h1 data-sound-title>YDP Grand Piano</h1>
-        <p class="subtitle" data-sound-subtitle>The default RackForge acoustic piano.</p>
-        <div class="tabs" role="tablist" aria-label="Instrument sections">
-          <button class="tab" type="button" role="tab" id="tab-sounds"
-                  aria-controls="panel-sounds" aria-selected="true" data-tab="sounds">Sounds</button>
-          <button class="tab" type="button" role="tab" id="tab-levels"
-                  aria-controls="panel-levels" aria-selected="false" tabindex="-1" data-tab="levels">Levels</button>
-        </div>
-        <div class="tabpanels">
-          <section class="tabpanel" role="tabpanel" id="panel-sounds"
-                   aria-labelledby="tab-sounds" data-panel="sounds" data-active>
-            <div class="sound-browser" data-sound-browser>
-              <strong>Sounds in this bank</strong>
-              <div class="sound-list" data-sound-list></div>
+      <section class="play-workspace">
+        <aside class="sound-browser" data-sound-browser aria-label="Sound browser">
+          <div class="browser-heading">
+            <div>
+              <span class="section-kicker">COLLECTION</span>
+              <strong>Libraries</strong>
             </div>
-          </section>
-          <section class="tabpanel" role="tabpanel" id="panel-levels"
-                   aria-labelledby="tab-levels" data-panel="levels" hidden>
-            <div class="volume-card">
-              <label for="master-volume">VOLUME</label>
-              <input id="master-volume" type="range" min="0" max="1" step="0.01" value="0.9" data-volume disabled>
-              <output data-volume-value>—</output>
+            <span class="sound-count" data-sound-count>0 SOUNDS</span>
+          </div>
+          <label class="sound-search">
+            <span>Search libraries and instruments</span>
+            <input type="search" autocomplete="off" placeholder="Search libraries or sounds…" data-sound-search>
+          </label>
+          <div class="sound-list" data-sound-list role="tree" aria-label="Available instrument libraries"></div>
+        </aside>
+
+        <section class="instrument-rack" aria-label="Loaded instrument" data-bank-shell data-bank-layout="studio">
+          <div class="rack-toolbar">
+            <div class="status" role="status" aria-live="polite">
+              <i></i><span data-play-status>READY</span>
             </div>
-          </section>
-        </div>
-        <div class="keyboard" aria-hidden="true"></div>
+            <span class="engine-badge" data-bank-engine>WASM · 96 VOICES</span>
+          </div>
+
+          <div class="bank-stage" data-bank-stage>
+            <div class="bank-artwork" data-bank-module="artwork">
+              <img data-bank-artwork alt="" hidden>
+              <div class="bank-artwork-shade"></div>
+              <span class="bank-edition" data-bank-edition>RF BANK</span>
+            </div>
+
+            <div class="instrument-display" data-bank-module="instrument">
+              <span class="section-kicker" data-bank-kicker>LOADED INSTRUMENT</span>
+              <h1 data-sound-title>YDP Grand Piano</h1>
+              <p class="subtitle" data-sound-subtitle>The default RackForge acoustic piano.</p>
+              <div class="display-meta">
+                <span data-active-bank>Factory bank</span>
+                <span data-active-format>RF INSTRUMENT</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="control-deck" data-bank-module="controls">
+            <div class="control-heading">
+              <span class="section-kicker" data-bank-control-kicker>CHANNEL</span>
+              <strong data-bank-control-title>Output</strong>
+            </div>
+            <div class="control-stack">
+              <div class="volume-card">
+                <label for="master-volume">MASTER</label>
+                <input id="master-volume" type="range" min="0" max="1" step="0.01"
+                       value="0.9" data-volume disabled>
+                <output data-volume-value>—</output>
+              </div>
+              <div class="fx-card" data-fx-card hidden>
+                <div class="fx-summary">
+                  <button class="fx-toggle" type="button" data-fx-toggle aria-expanded="false"
+                          aria-controls="fx-editor">
+                    <span data-fx-label>RF EFFECT</span>
+                    <small data-fx-action>EDIT</small>
+                    <i aria-hidden="true">›</i>
+                  </button>
+                  <label for="fx-amount">MIX</label>
+                  <input id="fx-amount" type="range" min="0" max="1" step="0.01"
+                         value="1" data-fx-amount disabled>
+                  <output data-fx-amount-value>—</output>
+                </div>
+                <div class="fx-editor" id="fx-editor" data-fx-editor hidden>
+                  <div class="fx-editor-heading">
+                    <div>
+                      <span class="section-kicker">RF EFFECT ENGINE</span>
+                      <strong>Effect parameters</strong>
+                    </div>
+                    <button type="button" data-fx-reset>RESET</button>
+                  </div>
+                  <div class="fx-parameter-grid" data-fx-parameters></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
       </section>
-      <footer><span>96 VOICE POLYPHONY</span><span>FREEPATS · CC BY 3.0</span></footer>
+      <footer><span data-bank-footer>RACKFORGE INSTRUMENT</span><span data-bank-credit>FREEPATS · CC BY 3.0</span></footer>
     </main>
     <script src="app.js" defer></script>
   </body>

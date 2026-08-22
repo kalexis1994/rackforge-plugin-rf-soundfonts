@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "pages": [
-    { "id": "sound", "name": "Sound", "order": 0, "header": "RF-Soundfonts" }
+    { "id": "sound", "name": "Sound", "order": 0, "header": "RF-Soundfonts" },
+    { "id": "effects", "name": "Effects", "order": 1, "header": "RF Effects" }
   ],
   "parameters": [
     {
@@ -24,6 +25,118 @@
         "read_only": false,
         "advanced": false
       },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 1,
+      "id": "fx-amount",
+      "name": "FX Amount",
+      "page": "sound",
+      "order": 1,
+      "kind": {
+        "type": "float",
+        "minimum": 0.0,
+        "maximum": 1.0,
+        "default": 1.0,
+        "step": 0.01,
+        "unit": "x"
+      },
+      "flags": {
+        "automatable": true,
+        "modulatable": true,
+        "read_only": false,
+        "advanced": false
+      },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 2,
+      "id": "reverb-size",
+      "name": "Reverb Size",
+      "page": "effects",
+      "order": 0,
+      "kind": { "type": "float", "minimum": 0.5, "maximum": 1.5, "default": 1.0, "step": 0.01, "unit": "x" },
+      "flags": { "automatable": true, "modulatable": true, "read_only": false, "advanced": true },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 3,
+      "id": "reverb-decay",
+      "name": "Reverb Decay",
+      "page": "effects",
+      "order": 1,
+      "kind": { "type": "float", "minimum": 0.25, "maximum": 4.0, "default": 1.0, "step": 0.01, "unit": "x" },
+      "flags": { "automatable": true, "modulatable": true, "read_only": false, "advanced": true },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 4,
+      "id": "reverb-pre-delay",
+      "name": "Reverb Pre-delay",
+      "page": "effects",
+      "order": 2,
+      "kind": { "type": "float", "minimum": 0.0, "maximum": 2.0, "default": 1.0, "step": 0.01, "unit": "x" },
+      "flags": { "automatable": true, "modulatable": true, "read_only": false, "advanced": true },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 5,
+      "id": "reverb-damping",
+      "name": "Reverb Damping",
+      "page": "effects",
+      "order": 3,
+      "kind": { "type": "float", "minimum": -0.5, "maximum": 0.5, "default": 0.0, "step": 0.01, "unit": "x" },
+      "flags": { "automatable": true, "modulatable": true, "read_only": false, "advanced": true },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 6,
+      "id": "reverb-width",
+      "name": "Reverb Width",
+      "page": "effects",
+      "order": 4,
+      "kind": { "type": "float", "minimum": 0.0, "maximum": 1.5, "default": 1.0, "step": 0.01, "unit": "x" },
+      "flags": { "automatable": true, "modulatable": true, "read_only": false, "advanced": true },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 7,
+      "id": "delay-time",
+      "name": "Delay Time",
+      "page": "effects",
+      "order": 5,
+      "kind": { "type": "float", "minimum": 0.25, "maximum": 4.0, "default": 1.0, "step": 0.01, "unit": "x" },
+      "flags": { "automatable": true, "modulatable": true, "read_only": false, "advanced": true },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 8,
+      "id": "delay-feedback",
+      "name": "Delay Feedback",
+      "page": "effects",
+      "order": 6,
+      "kind": { "type": "float", "minimum": -0.5, "maximum": 0.2, "default": 0.0, "step": 0.01, "unit": "x" },
+      "flags": { "automatable": true, "modulatable": true, "read_only": false, "advanced": true },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 9,
+      "id": "delay-damping",
+      "name": "Delay Damping",
+      "page": "effects",
+      "order": 7,
+      "kind": { "type": "float", "minimum": -0.5, "maximum": 0.5, "default": 0.0, "step": 0.01, "unit": "x" },
+      "flags": { "automatable": true, "modulatable": true, "read_only": false, "advanced": true },
+      "suggested_control": "knob"
+    },
+    {
+      "index": 10,
+      "id": "delay-stereo",
+      "name": "Delay Stereo",
+      "page": "effects",
+      "order": 8,
+      "kind": { "type": "float", "minimum": 0.0, "maximum": 1.5, "default": 1.0, "step": 0.01, "unit": "x" },
+      "flags": { "automatable": true, "modulatable": true, "read_only": false, "advanced": true },
       "suggested_control": "knob"
     }
   ]

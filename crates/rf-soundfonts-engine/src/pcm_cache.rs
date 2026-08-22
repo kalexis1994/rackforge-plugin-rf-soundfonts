@@ -274,6 +274,26 @@ fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> Result<(), Soun
     Ok(())
 }
 
+/// Portable compilation fallback. The WebAssembly plugin never opens the
+/// native PCM cache, but keeping the library format-neutral lets it reuse the
+/// resident WAV/NKI reader without conditional module trees.
+#[cfg(not(any(unix, windows)))]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> Result<(), SoundfontError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut reader = file.try_clone().map_err(|source| SoundfontError::Read {
+        path: "PCM cache".into(),
+        source,
+    })?;
+    reader
+        .seek(SeekFrom::Start(offset))
+        .and_then(|_| reader.read_exact(buffer))
+        .map_err(|source| SoundfontError::Read {
+            path: "PCM cache".into(),
+            source,
+        })
+}
+
 /// Where a sample's cache lives, given the library root and the sample path.
 ///
 /// Kept in one directory beside the instrument so the whole cache can be

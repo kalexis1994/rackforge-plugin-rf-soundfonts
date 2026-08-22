@@ -3,6 +3,9 @@ use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
 use std::io::Cursor;
 use std::sync::Arc;
 
+mod nki_bank;
+mod nki_effects;
+
 const RESOURCE_ID: &str = "factory-soundfont";
 /// Persistent user bank; delivered after the factory one, so it wins.
 const USER_RESOURCE_ID: &str = "user-soundfont";
@@ -13,6 +16,8 @@ const MAX_FRAMES: usize = 4096;
 const MAX_TRANSFER_BYTES: usize = 256 * 1024;
 const MASTER_VOLUME_INDEX: u32 = 0;
 const DEFAULT_MASTER_VOLUME: f64 = 0.9;
+const FX_AMOUNT_INDEX: u32 = 1;
+const DEFAULT_FX_AMOUNT: f64 = 1.0;
 /// More presets than any playable bank needs, few enough that the serialized
 /// catalog always has a chance to fit the transfer buffer.
 const MAX_CATALOG_PRESETS: usize = 1536;
@@ -21,8 +26,32 @@ const PERCUSSION_CHANNEL: i32 = 9;
 const DRUM_BANK_OFFSET: i32 = 128;
 
 struct PendingResource {
+    source: BankSource,
     expected_bytes: usize,
     bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BankSource {
+    Factory,
+    User,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BankFormat {
+    SoundFont,
+    Kontakt,
+}
+
+impl BankSource {
+    fn bank_name(self, bank: i32) -> String {
+        match self {
+            Self::Factory if bank == 0 => "YDP Grand Piano".into(),
+            Self::Factory => format!("YDP Grand Piano · Bank {bank}"),
+            Self::User if bank >= DRUM_BANK_OFFSET => format!("User SoundFont · Drums {bank}"),
+            Self::User => format!("User SoundFont · Bank {bank}"),
+        }
+    }
 }
 
 /// One playable SoundFont preset: bank number, patch number, display name.
@@ -31,10 +60,15 @@ type CatalogEntry = (i32, i32, String);
 struct PortableSoundfonts {
     sound_font: Option<Arc<SoundFont>>,
     synth: Option<Synthesizer>,
+    nki: Option<nki_bank::Player>,
     pending: Option<PendingResource>,
+    active_source: Option<BankSource>,
+    active_format: Option<BankFormat>,
     sample_rate: i32,
     selected: Option<(i32, i32)>,
     master_volume: f64,
+    fx_amount: f64,
+    fx_controls: nki_effects::EffectControls,
     left: Vec<f32>,
     right: Vec<f32>,
 }
@@ -44,10 +78,15 @@ impl Default for PortableSoundfonts {
         Self {
             sound_font: None,
             synth: None,
+            nki: None,
             pending: None,
+            active_source: None,
+            active_format: None,
             sample_rate: 48_000,
             selected: None,
             master_volume: DEFAULT_MASTER_VOLUME,
+            fx_amount: DEFAULT_FX_AMOUNT,
+            fx_controls: nki_effects::EffectControls::default(),
             left: vec![0.0; MAX_FRAMES],
             right: vec![0.0; MAX_FRAMES],
         }
@@ -76,7 +115,7 @@ fn normalize_entries(mut entries: Vec<CatalogEntry>) -> Vec<CatalogEntry> {
     entries
 }
 
-fn build_catalog_json(entries: &[CatalogEntry]) -> Vec<u8> {
+fn build_catalog_json(entries: &[CatalogEntry], source: BankSource) -> Vec<u8> {
     let mut banks: Vec<i32> = entries.iter().map(|entry| entry.0).collect();
     banks.dedup();
     let banks_json: Vec<serde_json::Value> = banks
@@ -85,11 +124,7 @@ fn build_catalog_json(entries: &[CatalogEntry]) -> Vec<u8> {
         .map(|(order, bank)| {
             serde_json::json!({
                 "id": format!("b{bank:03}"),
-                "name": if *bank >= DRUM_BANK_OFFSET {
-                    format!("Drums {bank}")
-                } else {
-                    format!("Bank {bank}")
-                },
+                "name": source.bank_name(*bank),
                 "order": order as i32,
             })
         })
@@ -121,9 +156,13 @@ fn build_catalog_json(entries: &[CatalogEntry]) -> Vec<u8> {
 
 /// Serializes the catalog into `destination`, halving the preset list until
 /// it fits rather than publishing nothing for an oversized bank.
-fn fit_catalog(mut entries: Vec<CatalogEntry>, destination: &mut [u8]) -> Option<usize> {
+fn fit_catalog(
+    mut entries: Vec<CatalogEntry>,
+    source: BankSource,
+    destination: &mut [u8],
+) -> Option<usize> {
     loop {
-        let bytes = build_catalog_json(&entries);
+        let bytes = build_catalog_json(&entries, source);
         if bytes.len() <= destination.len() {
             destination[..bytes.len()].copy_from_slice(&bytes);
             return Some(bytes.len());
@@ -153,6 +192,10 @@ impl PortableSoundfonts {
     }
 
     fn rebuild_synth(&mut self) -> bool {
+        if self.active_format == Some(BankFormat::Kontakt) {
+            self.synth = None;
+            return true;
+        }
         let Some(sound_font) = self.sound_font.as_ref() else {
             self.synth = None;
             return true;
@@ -205,12 +248,26 @@ impl PortableSoundfonts {
         );
     }
 
-    fn apply_parameter(synth: &mut Synthesizer, master_volume: &mut f64, event: ParameterEvent) {
-        if event.index != MASTER_VOLUME_INDEX || !event.value.is_finite() {
+    fn apply_parameter(
+        synth: &mut Synthesizer,
+        master_volume: &mut f64,
+        fx_amount: &mut f64,
+        fx_controls: &mut nki_effects::EffectControls,
+        event: ParameterEvent,
+    ) {
+        if !event.value.is_finite() {
             return;
         }
-        *master_volume = event.value.clamp(0.0, 1.0);
-        synth.set_master_volume(*master_volume as f32);
+        match event.index {
+            MASTER_VOLUME_INDEX => {
+                *master_volume = event.value.clamp(0.0, 1.0);
+                synth.set_master_volume(*master_volume as f32);
+            }
+            FX_AMOUNT_INDEX => *fx_amount = event.value.clamp(0.0, 1.0),
+            _ => {
+                let _ = fx_controls.set_parameter(event.index, event.value as f32);
+            }
+        }
     }
 
     fn render_segment(
@@ -255,25 +312,49 @@ impl Processor for PortableSoundfonts {
             return false;
         }
         self.sample_rate = sample_rate.round() as i32;
+        if let Some(player) = self.nki.as_mut() {
+            player.set_sample_rate(self.sample_rate as u32);
+            player.set_effect_controls(self.fx_controls);
+        }
         self.rebuild_synth()
     }
 
     fn set_parameter(&mut self, index: u32, value: f64) -> bool {
-        if index != MASTER_VOLUME_INDEX || !value.is_finite() {
+        if !value.is_finite() {
             return false;
         }
-        self.master_volume = value.clamp(0.0, 1.0);
-        if let Some(synth) = self.synth.as_mut() {
-            synth.set_master_volume(self.master_volume as f32);
+        match index {
+            MASTER_VOLUME_INDEX => {
+                self.master_volume = value.clamp(0.0, 1.0);
+                if let Some(synth) = self.synth.as_mut() {
+                    synth.set_master_volume(self.master_volume as f32);
+                }
+            }
+            FX_AMOUNT_INDEX => self.fx_amount = value.clamp(0.0, 1.0),
+            _ => {
+                if !self.fx_controls.set_parameter(index, value as f32) {
+                    return false;
+                }
+                if let Some(player) = self.nki.as_mut() {
+                    player.set_effect_controls(self.fx_controls);
+                }
+            }
         }
         true
     }
 
     fn get_parameter(&self, index: u32) -> Option<f64> {
-        (index == MASTER_VOLUME_INDEX).then_some(self.master_volume)
+        match index {
+            MASTER_VOLUME_INDEX => Some(self.master_volume),
+            FX_AMOUNT_INDEX => Some(self.fx_amount),
+            _ => self.fx_controls.parameter(index),
+        }
     }
 
     fn reset(&mut self) {
+        if let Some(player) = self.nki.as_mut() {
+            player.reset();
+        }
         if let Some(synth) = self.synth.as_mut() {
             synth.reset();
             Self::apply_selection(synth, self.selected);
@@ -285,11 +366,12 @@ impl Processor for PortableSoundfonts {
         let Ok(expected_bytes) = usize::try_from(total_bytes) else {
             return false;
         };
-        if (id != RESOURCE_ID && id != USER_RESOURCE_ID)
-            || expected_bytes == 0
-            || expected_bytes > MAX_BANK_BYTES
-            || self.pending.is_some()
-        {
+        let source = match id {
+            RESOURCE_ID => BankSource::Factory,
+            USER_RESOURCE_ID => BankSource::User,
+            _ => return false,
+        };
+        if expected_bytes == 0 || expected_bytes > MAX_BANK_BYTES || self.pending.is_some() {
             return false;
         }
         let mut bytes = Vec::new();
@@ -297,6 +379,7 @@ impl Processor for PortableSoundfonts {
             return false;
         }
         self.pending = Some(PendingResource {
+            source,
             expected_bytes,
             bytes,
         });
@@ -323,6 +406,37 @@ impl Processor for PortableSoundfonts {
         if pending.bytes.len() != pending.expected_bytes {
             return false;
         }
+        if pending.bytes.starts_with(b"PK\x03\x04") {
+            if pending.source != BankSource::User {
+                return false;
+            }
+            let Ok(mut player) =
+                nki_bank::Player::from_bytes(pending.bytes, self.sample_rate as u32)
+            else {
+                return false;
+            };
+            let selection = self
+                .nki
+                .as_ref()
+                .and_then(|current| current.selected_id())
+                .map(str::to_string)
+                .filter(|id| player.load_preset(id))
+                .unwrap_or_else(|| {
+                    let id = player.first_id().to_string();
+                    let _ = player.load_preset(&id);
+                    id
+                });
+            if player.selected_id() != Some(selection.as_str()) {
+                return false;
+            }
+            player.set_effect_controls(self.fx_controls);
+            self.nki = Some(player);
+            self.synth = None;
+            self.active_source = Some(BankSource::User);
+            self.active_format = Some(BankFormat::Kontakt);
+            return true;
+        }
+
         let mut source = Cursor::new(pending.bytes.as_slice());
         let Ok(sound_font) = SoundFont::new(&mut source) else {
             return false;
@@ -338,15 +452,40 @@ impl Processor for PortableSoundfonts {
             }
         }
         self.sound_font = Some(sound_font);
+        self.nki = None;
+        self.active_source = Some(pending.source);
+        self.active_format = Some(BankFormat::SoundFont);
         self.rebuild_synth()
     }
 
     fn write_preset_catalog(&mut self, destination: &mut [u8]) -> Option<usize> {
+        if self.active_format == Some(BankFormat::Kontakt) {
+            let bytes = self.nki.as_ref()?.catalog_json();
+            if bytes.len() > destination.len() {
+                return None;
+            }
+            destination[..bytes.len()].copy_from_slice(&bytes);
+            return Some(bytes.len());
+        }
         let sound_font = self.sound_font.as_ref()?;
-        fit_catalog(Self::catalog_entries(sound_font), destination)
+        fit_catalog(
+            Self::catalog_entries(sound_font),
+            self.active_source.unwrap_or(BankSource::Factory),
+            destination,
+        )
     }
 
     fn load_preset(&mut self, id: &str) -> bool {
+        if self.active_format == Some(BankFormat::Kontakt) {
+            let Some(player) = self.nki.as_mut() else {
+                return false;
+            };
+            if !player.load_preset(id) {
+                return false;
+            }
+            player.set_effect_controls(self.fx_controls);
+            return true;
+        }
         let Some(sound_font) = self.sound_font.as_ref() else {
             return false;
         };
@@ -388,11 +527,84 @@ impl Processor for PortableSoundfonts {
             return;
         }
         let master_volume = &mut self.master_volume;
+        let fx_amount = &mut self.fx_amount;
+        let fx_controls = &mut self.fx_controls;
+        if self.active_format == Some(BankFormat::Kontakt) {
+            let Some(player) = self.nki.as_mut() else {
+                return;
+            };
+            let mut midi_index = 0;
+            let mut parameter_index = 0;
+            let mut position = 0;
+            loop {
+                let midi_frame = midi
+                    .get(midi_index)
+                    .map(|event| (event.frame as usize).min(frames));
+                let parameter_frame = parameters
+                    .get(parameter_index)
+                    .map(|event| (event.frame as usize).min(frames));
+                let boundary = midi_frame
+                    .unwrap_or(frames)
+                    .min(parameter_frame.unwrap_or(frames));
+                player.render(
+                    output,
+                    channels,
+                    position,
+                    boundary,
+                    *master_volume as f32,
+                    *fx_amount as f32,
+                );
+                position = boundary;
+                let mut dispatched = false;
+                while let Some(event) = midi.get(midi_index) {
+                    if (event.frame as usize).min(frames) > position {
+                        break;
+                    }
+                    if event.length > 0 && (0x80..0xF0).contains(&event.data[0]) {
+                        player.dispatch_midi(
+                            event.data[0],
+                            event.data[1] & 0x7f,
+                            event.data[2] & 0x7f,
+                        );
+                    }
+                    midi_index += 1;
+                    dispatched = true;
+                }
+                while let Some(event) = parameters.get(parameter_index) {
+                    if (event.frame as usize).min(frames) > position {
+                        break;
+                    }
+                    if event.value.is_finite() {
+                        match event.index {
+                            MASTER_VOLUME_INDEX => *master_volume = event.value.clamp(0.0, 1.0),
+                            FX_AMOUNT_INDEX => *fx_amount = event.value.clamp(0.0, 1.0),
+                            _ => {
+                                if fx_controls.set_parameter(event.index, event.value as f32) {
+                                    player.set_effect_controls(*fx_controls);
+                                }
+                            }
+                        }
+                    }
+                    parameter_index += 1;
+                    dispatched = true;
+                }
+                if !dispatched {
+                    break;
+                }
+            }
+            return;
+        }
         let Some(synth) = self.synth.as_mut() else {
             // Keep the published volume honest even while no bank is loaded.
             for event in parameters {
-                if event.index == MASTER_VOLUME_INDEX && event.value.is_finite() {
-                    *master_volume = event.value.clamp(0.0, 1.0);
+                if event.value.is_finite() {
+                    match event.index {
+                        MASTER_VOLUME_INDEX => *master_volume = event.value.clamp(0.0, 1.0),
+                        FX_AMOUNT_INDEX => *fx_amount = event.value.clamp(0.0, 1.0),
+                        _ => {
+                            let _ = fx_controls.set_parameter(event.index, event.value as f32);
+                        }
+                    }
                 }
             }
             return;
@@ -433,7 +645,7 @@ impl Processor for PortableSoundfonts {
                 if (event.frame as usize).min(frames) > position {
                     break;
                 }
-                Self::apply_parameter(synth, master_volume, *event);
+                Self::apply_parameter(synth, master_volume, fx_amount, fx_controls, *event);
                 parameter_index += 1;
                 dispatched = true;
             }
@@ -450,7 +662,7 @@ export_processor!(
     max_input_channels = 0,
     max_output_channels = 2,
     max_midi_events = 512,
-    max_parameter_events = 16,
+    max_parameter_events = 64,
     max_transfer_bytes = MAX_TRANSFER_BYTES
 );
 
@@ -519,15 +731,19 @@ mod tests {
 
     #[test]
     fn catalog_json_is_valid_and_named() {
-        let bytes = build_catalog_json(&[
-            (0, 0, "Grand Piano".into()),
-            (0, 1, "   ".into()),
-            (128, 0, "Standard Kit".into()),
-        ]);
+        let bytes = build_catalog_json(
+            &[
+                (0, 0, "Grand Piano".into()),
+                (0, 1, "   ".into()),
+                (128, 0, "Standard Kit".into()),
+            ],
+            BankSource::Factory,
+        );
         let catalog: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(catalog["schema_version"], 1);
         assert_eq!(catalog["banks"][0]["id"], "b000");
-        assert_eq!(catalog["banks"][1]["name"], "Drums 128");
+        assert_eq!(catalog["banks"][0]["name"], "YDP Grand Piano");
+        assert_eq!(catalog["banks"][1]["name"], "YDP Grand Piano · Bank 128");
         assert_eq!(catalog["presets"][0]["id"], "sf.b000.p000");
         assert_eq!(catalog["presets"][0]["name"], "Grand Piano");
         assert_eq!(catalog["presets"][1]["name"], "Preset 0:001");
@@ -540,24 +756,38 @@ mod tests {
             .map(|index| (0, index, format!("Preset number {index}")))
             .collect();
         let mut small = [0u8; 2048];
-        let length = fit_catalog(entries.clone(), &mut small).unwrap();
+        let length = fit_catalog(entries.clone(), BankSource::User, &mut small).unwrap();
         let catalog: serde_json::Value = serde_json::from_slice(&small[..length]).unwrap();
         assert!(catalog["presets"].as_array().unwrap().len() < entries.len());
+        assert_eq!(catalog["banks"][0]["name"], "User SoundFont · Bank 0");
         let mut tiny = [0u8; 8];
-        assert_eq!(fit_catalog(entries, &mut tiny), None);
+        assert_eq!(fit_catalog(entries, BankSource::User, &mut tiny), None);
     }
 
     #[test]
-    fn master_volume_is_clamped_and_readable() {
+    fn parameters_are_clamped_and_readable() {
         let mut plugin = PortableSoundfonts::default();
         assert_eq!(plugin.get_parameter(0), Some(DEFAULT_MASTER_VOLUME));
+        assert_eq!(plugin.get_parameter(1), Some(DEFAULT_FX_AMOUNT));
         assert!(plugin.set_parameter(0, 0.4));
         assert_eq!(plugin.get_parameter(0), Some(0.4));
         assert!(plugin.set_parameter(0, 7.0));
         assert_eq!(plugin.get_parameter(0), Some(1.0));
+        assert!(plugin.set_parameter(1, -2.0));
+        assert_eq!(plugin.get_parameter(1), Some(0.0));
+        assert!(plugin.set_parameter(nki_effects::REVERB_DECAY_INDEX, 9.0));
+        assert_eq!(
+            plugin.get_parameter(nki_effects::REVERB_DECAY_INDEX),
+            Some(4.0)
+        );
+        assert!(plugin.set_parameter(nki_effects::DELAY_FEEDBACK_INDEX, -9.0));
+        assert_eq!(
+            plugin.get_parameter(nki_effects::DELAY_FEEDBACK_INDEX),
+            Some(-0.5)
+        );
         assert!(!plugin.set_parameter(0, f64::NAN));
-        assert!(!plugin.set_parameter(1, 0.5));
-        assert_eq!(plugin.get_parameter(1), None);
+        assert!(!plugin.set_parameter(11, 0.5));
+        assert_eq!(plugin.get_parameter(11), None);
     }
 
     #[test]
@@ -565,13 +795,30 @@ mod tests {
         let mut plugin = PortableSoundfonts::default();
         assert!(plugin.prepare(48_000.0, 64, 0, 2));
         let mut output = [0.0; 128];
-        let events = [ParameterEvent {
-            frame: 10,
-            index: 0,
-            value: 0.25,
-        }];
+        let events = [
+            ParameterEvent {
+                frame: 10,
+                index: 0,
+                value: 0.25,
+            },
+            ParameterEvent {
+                frame: 20,
+                index: 1,
+                value: 0.45,
+            },
+            ParameterEvent {
+                frame: 30,
+                index: nki_effects::REVERB_SIZE_INDEX,
+                value: 1.25,
+            },
+        ];
         plugin.process(&[], &mut output, &[], &events, 64, 0, 2);
         assert_eq!(plugin.get_parameter(0), Some(0.25));
+        assert_eq!(plugin.get_parameter(1), Some(0.45));
+        assert_eq!(
+            plugin.get_parameter(nki_effects::REVERB_SIZE_INDEX),
+            Some(1.25)
+        );
     }
 
     #[test]
@@ -606,6 +853,57 @@ mod tests {
             output.iter().any(|sample| sample.abs() > 0.0),
             "a selected preset must produce audio"
         );
+    }
+
+    #[test]
+    #[ignore = "set RF_SOUNDFONTS_DIRECT_BUNDLES to a directory of single-NKI RF banks"]
+    fn direct_nki_bundles_pass_resource_end() {
+        let directory = std::env::var("RF_SOUNDFONTS_DIRECT_BUNDLES")
+            .expect("RF_SOUNDFONTS_DIRECT_BUNDLES not set");
+        let mut paths: Vec<_> = std::fs::read_dir(directory)
+            .expect("cannot read direct-bundle directory")
+            .map(|entry| entry.expect("cannot read direct-bundle entry").path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("rfbank"))
+            })
+            .collect();
+        paths.sort();
+        assert!(!paths.is_empty(), "no direct NKI bundles found");
+
+        for path in paths {
+            let bytes = std::fs::read(&path).expect("cannot read direct NKI bundle");
+            let mut plugin = PortableSoundfonts::default();
+            assert!(plugin.prepare(48_000.0, 128, 0, 2));
+            assert!(
+                plugin.begin_resource(USER_RESOURCE_ID, bytes.len() as u64),
+                "resource_begin rejected {}",
+                path.display()
+            );
+            for (index, chunk) in bytes.chunks(64 * 1024).enumerate() {
+                assert!(
+                    plugin.write_resource((index * 64 * 1024) as u64, chunk),
+                    "resource_write rejected {}",
+                    path.display()
+                );
+            }
+            assert!(
+                plugin.end_resource(),
+                "resource_end rejected {}",
+                path.display()
+            );
+            let mut catalog = vec![0_u8; MAX_TRANSFER_BYTES];
+            let length = plugin
+                .write_preset_catalog(&mut catalog)
+                .unwrap_or_else(|| panic!("catalog failed for {}", path.display()));
+            let catalog: serde_json::Value = serde_json::from_slice(&catalog[..length]).unwrap();
+            assert_eq!(
+                catalog["presets"].as_array().map(Vec::len),
+                Some(1),
+                "direct bundle should contain one NKI: {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

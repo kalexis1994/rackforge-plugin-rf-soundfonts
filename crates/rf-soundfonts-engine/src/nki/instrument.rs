@@ -493,7 +493,7 @@ mod tests {
                     Err(error) => panic!("{}: {error}", path.display()),
                 };
                 for report in &reports {
-                    eprintln!("   aviso: {report}");
+                    eprintln!("   warning: {report}");
                 }
 
                 // A note in the middle of whatever the instrument covers.
@@ -515,7 +515,7 @@ mod tests {
                 }
                 let starved: usize = voices.iter().map(crate::Voice::starved_frames).sum();
                 eprintln!(
-                    "{:30} regiones={:3}  {} MiB  release {:.0}..{:.0} ms  nota {note} -> {} voces, pico {peak:.4}, hambre {starved}",
+                    "{:30} regions={:3}  {} MiB  release {:.0}..{:.0} ms  note {note} -> {} voices, peak {peak:.4}, starved {starved}",
                     instrument.name,
                     instrument.regions.len(),
                     instrument.resident_bytes() / 1_048_576,
@@ -540,6 +540,6 @@ mod tests {
             }
         }
         assert!(played > 0, "no .nki files were found");
-        eprintln!("instrumentos tocados: {played}");
+        eprintln!("instruments played: {played}");
     }
 }

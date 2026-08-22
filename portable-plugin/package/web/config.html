@@ -14,43 +14,48 @@
         <p>LIBRARY SETTINGS</p>
       </header>
       <section class="panel">
-        <div class="status"><i></i><span>RACKFORGE STORAGE</span></div>
+        <div class="status"><i></i><span data-config-status>RACKFORGE STORAGE</span></div>
         <h1>Sound library</h1>
-        <p class="subtitle">RackForge owns access to your folders on every platform.</p>
+        <p class="subtitle">Build a reusable collection of RF-Soundfonts instruments.</p>
         <div class="tabs" role="tablist" aria-label="Library settings sections">
           <button class="tab" type="button" role="tab" id="tab-library"
                   aria-controls="panel-library" aria-selected="true" data-tab="library">Library</button>
           <button class="tab" type="button" role="tab" id="tab-bank"
-                  aria-controls="panel-bank" aria-selected="false" tabindex="-1" data-tab="bank">User bank</button>
+                  aria-controls="panel-bank" aria-selected="false" tabindex="-1" data-tab="bank">Active library</button>
         </div>
         <div class="tabpanels">
           <section class="tabpanel" role="tabpanel" id="panel-library"
                    aria-labelledby="tab-library" data-panel="library" data-active>
             <div class="library-card">
               <div>
-                <strong>Source folder</strong>
-                <span data-library-selection>No folder selected.</span>
+                <strong>Add a library</strong>
+                <span data-library-selection role="status" aria-live="polite">Your existing libraries remain available.</span>
               </div>
-              <button type="button" data-select-library>Select folder</button>
+              <button type="button" data-select-library>Add library</button>
             </div>
-            <div class="library-files" data-library-files hidden>
-              <strong>SoundFonts in this folder</strong>
-              <div data-library-entries></div>
+            <div class="library-files" data-library-files>
+              <div class="library-files-heading">
+                <strong>Added libraries</strong>
+                <span data-library-count>0 LIBRARIES</span>
+              </div>
+              <div data-library-entries>
+                <span class="empty">No user libraries added yet.</span>
+              </div>
             </div>
           </section>
           <section class="tabpanel" role="tabpanel" id="panel-bank"
                    aria-labelledby="tab-bank" data-panel="bank" hidden>
             <div class="bank-card" data-factory-card hidden>
               <div>
-                <strong>Installed user bank</strong>
-                <span>Replaces the factory piano on every start.</span>
+                <strong data-installed-bank-name>Active user library</strong>
+                <span data-installed-bank-detail>Loaded automatically on every start.</span>
               </div>
-              <button type="button" data-clear-bank>Restore factory bank</button>
+              <button type="button" class="danger-action" data-clear-bank>Restore factory bank</button>
             </div>
             <div class="bank-card" data-no-bank>
               <div>
-                <strong>No user bank installed</strong>
-                <span>The factory YDP Grand Piano is playing. Install one from the Library tab.</span>
+                <strong>Factory library active</strong>
+                <span>Your added libraries remain available in the Library tab and can be loaded at any time.</span>
               </div>
             </div>
           </section>

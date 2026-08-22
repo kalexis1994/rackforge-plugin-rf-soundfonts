@@ -1,13 +1,21 @@
-schema_version = 1
+schema_version = 2
 id = "org.rackforge.rf-soundfonts"
 name = "RF-Soundfonts"
 vendor = "RackForge"
-version = "0.3.0"
+version = "0.5.13"
+description = "A portable RF-Soundfonts instrument library with a factory grand piano ready to perform."
 kind = "instrument"
 state_version = 1
 capabilities = ["audio_output", "midi_input", "presets", "sample_accurate_automation"]
 ui_layouts = ["little@1"]
 config_mode = true
+
+[branding]
+icon = "branding/icon.png"
+banner = "branding/banner.png"
+splash = "branding/splash.png"
+background_color = "#091413"
+accent_color = "#B0E4CC"
 
 [midi]
 channel_model = "single_part"
@@ -34,7 +42,7 @@ minor = 7
 
 [[resources]]
 id = "factory-soundfont"
-name = "YDP Grand Piano SoundFont"
+name = "YDP Grand Piano"
 kind = "file"
 required = true
 package_path = "assets/ydp-grand-piano.sf2"
@@ -43,16 +51,10 @@ package_path = "assets/ydp-grand-piano.sf2"
 # so this bank arrives after the factory one and becomes the playing bank.
 [[resources]]
 id = "user-soundfont"
-name = "User SoundFont"
+name = "RF instrument library"
 kind = "file"
 required = false
 data_path = "banks/user-soundfont.sf2"
-
-[[resources]]
-id = "user-library"
-name = "SoundFont library"
-kind = "directory"
-required = false
 
 [component]
 abi = "wasm-v1"

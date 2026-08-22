@@ -1,8 +1,9 @@
-schema_version = 1
+schema_version = 2
 id = "org.rackforge.rf-soundfonts"
 name = "RF-Soundfonts"
 vendor = "RackForge"
-version = "0.3.0"
+version = "0.5.13"
+description = "A library instrument for discovering and playing DLS and SFZ sample collections."
 kind = "instrument"
 state_version = 4
 capabilities = [
@@ -14,6 +15,13 @@ capabilities = [
 ]
 ui_layouts = ["little@1"]
 config_mode = true
+
+[branding]
+icon = "branding/icon.png"
+banner = "branding/banner.png"
+splash = "branding/splash.png"
+background_color = "#091413"
+accent_color = "#B0E4CC"
 
 [midi]
 channel_model = "single_part"
