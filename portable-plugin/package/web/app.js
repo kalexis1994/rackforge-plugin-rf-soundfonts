@@ -1145,6 +1145,605 @@
     });
   }
 
+  // CONFIG: native RF instrument builder. A zone owns its velocity layers and
+  // may override the instrument envelope as a whole; individual keys do not
+  // acquire hidden per-note state.
+  const builderViewport = document.querySelector("[data-builder-viewport]");
+  const builderMap = document.querySelector("[data-builder-map]");
+  const builderKeys = document.querySelector("[data-builder-keys]");
+  const builderLane = document.querySelector("[data-builder-lane]");
+  const builderName = document.querySelector("[data-builder-name]");
+  const builderSummary = document.querySelector("[data-builder-summary]");
+  const builderMessage = document.querySelector("[data-builder-message]");
+  const builderNewZone = document.querySelector("[data-builder-new-zone]");
+  const builderExport = document.querySelector("[data-builder-export]");
+  const builderSamples = document.querySelector("[data-builder-samples]");
+  const globalEnvelopeHost = document.querySelector("[data-global-envelope]");
+  const zoneDialog = document.querySelector("[data-zone-dialog]");
+  const zoneEnvelopeHost = document.querySelector("[data-zone-envelope]");
+  const layerList = document.querySelector("[data-layer-list]");
+  const BUILDER_DRAFT_KEY = "rf-soundfonts.instrument-builder.v1";
+  const SAMPLE_LIMIT_BYTES = 160 * 1_048_576;
+  let builderRowHeight = 28;
+  let selectedZoneId = null;
+  let editingZone = null;
+  let sampleTargetLayerId = null;
+  let builderDidInitialScroll = false;
+  const builderFiles = new Map();
+
+  const defaultEnvelope = () => ({ attack: 0.01, decay: 0.2, sustain: 0.8, release: 0.4 });
+  const defaultBuilderState = () => ({
+    schema_version: 1,
+    name: "My RF Instrument",
+    envelope: defaultEnvelope(),
+    zones: [],
+  });
+  let builderState = (() => {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(BUILDER_DRAFT_KEY) || "null");
+      if (stored?.schema_version === 1 && Array.isArray(stored.zones)) return stored;
+    } catch (_) {
+      // A fresh draft is safer than attempting to repair malformed local data.
+    }
+    return defaultBuilderState();
+  })();
+
+  const builderId = (prefix) =>
+    `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const clampNumber = (value, low, high, fallback) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.min(high, Math.max(low, number)) : fallback;
+  };
+
+  const noteName = (note) => {
+    const names = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+    return `${names[note % 12]}${Math.floor(note / 12) - 1}`;
+  };
+
+  const persistBuilder = () => {
+    try {
+      window.localStorage.setItem(BUILDER_DRAFT_KEY, JSON.stringify(builderState));
+    } catch (_) {
+      setBuilderMessage("The draft cannot be stored in this session.", "error");
+    }
+  };
+
+  const setBuilderMessage = (message, kind = "") => {
+    if (!builderMessage) return;
+    builderMessage.textContent = message;
+    builderMessage.toggleAttribute("data-error", kind === "error");
+    builderMessage.toggleAttribute("data-success", kind === "success");
+  };
+
+  const envelopeDefinitions = [
+    { key: "attack", label: "Attack", min: 0, max: 5, step: 0.001, unit: "s" },
+    { key: "decay", label: "Decay", min: 0, max: 5, step: 0.001, unit: "s" },
+    { key: "sustain", label: "Sustain", min: 0, max: 1, step: 0.01, unit: "%" },
+    { key: "release", label: "Release", min: 0, max: 10, step: 0.001, unit: "s" },
+  ];
+
+  const envelopeLabel = (definition, value) =>
+    definition.unit === "%" ? `${Math.round(value * 100)}%` : `${value.toFixed(value < 0.1 ? 3 : 2)} s`;
+
+  const renderEnvelope = (host, envelope, onChange) => {
+    if (!host) return;
+    const fragment = document.createDocumentFragment();
+    for (const definition of envelopeDefinitions) {
+      const label = document.createElement("label");
+      label.className = "adsr-control";
+      const caption = document.createElement("span");
+      caption.textContent = definition.label;
+      const output = document.createElement("output");
+      const input = document.createElement("input");
+      input.type = "range";
+      input.min = definition.min;
+      input.max = definition.max;
+      input.step = definition.step;
+      input.value = clampNumber(envelope[definition.key], definition.min, definition.max, 0);
+      output.textContent = envelopeLabel(definition, Number(input.value));
+      input.addEventListener("input", () => {
+        const value = Number(input.value);
+        envelope[definition.key] = value;
+        output.textContent = envelopeLabel(definition, value);
+        onChange?.();
+      });
+      label.append(caption, output, input);
+      fragment.append(label);
+    }
+    host.replaceChildren(fragment);
+  };
+
+  const newLayer = (velocityLow = 1, velocityHigh = 127) => ({
+    id: builderId("layer"),
+    sample_name: "",
+    velocity_low: velocityLow,
+    velocity_high: velocityHigh,
+    gain_db: 0,
+    pan: 0,
+    tune_semitones: 0,
+  });
+
+  const newZone = (note = 60) => ({
+    id: builderId("zone"),
+    name: `Zone ${noteName(note)}`,
+    key_low: note,
+    key_high: note,
+    root_key: note,
+    envelope_override: null,
+    layers: [newLayer()],
+  });
+
+  const renderBuilderKeys = () => {
+    if (!builderKeys) return;
+    const fragment = document.createDocumentFragment();
+    const black = new Set([1, 3, 6, 8, 10]);
+    for (let note = 127; note >= 0; note -= 1) {
+      const key = document.createElement("div");
+      key.className = `builder-key${black.has(note % 12) ? " black" : ""}${note === 60 ? " middle-c" : ""}`;
+      key.style.top = `calc(var(--builder-row) * ${127 - note})`;
+      key.textContent = `${noteName(note)}  ${note}`;
+      key.dataset.note = String(note);
+      key.addEventListener("dblclick", () => openZoneEditor(newZone(note)));
+      fragment.append(key);
+    }
+    builderKeys.replaceChildren(fragment);
+  };
+
+  const renderBuilderZones = () => {
+    if (!builderLane) return;
+    const fragment = document.createDocumentFragment();
+    for (const [index, zone] of builderState.zones.entries()) {
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = `zone-pill${zone.id === selectedZoneId ? " selected" : ""}`;
+      pill.style.top = `calc(var(--builder-row) * ${127 - zone.key_high} + 2px)`;
+      pill.style.height = `calc(var(--builder-row) * ${zone.key_high - zone.key_low + 1} - 4px)`;
+      pill.style.left = `${12 + (index % 4) * 7}px`;
+      pill.style.right = `${12 + ((index + 1) % 4) * 7}px`;
+      pill.dataset.zoneId = zone.id;
+      const title = document.createElement("strong");
+      title.textContent = zone.name || `Zone ${index + 1}`;
+      const detail = document.createElement("span");
+      detail.textContent = `${noteName(zone.key_low)}–${noteName(zone.key_high)} · ${zone.layers.length} layer${zone.layers.length === 1 ? "" : "s"}${zone.envelope_override ? " · ADSR override" : ""}`;
+      pill.append(title, detail);
+      pill.addEventListener("click", () => {
+        selectedZoneId = zone.id;
+        renderBuilderZones();
+      });
+      pill.addEventListener("dblclick", () => openZoneEditor(zone));
+      fragment.append(pill);
+    }
+    builderLane.replaceChildren(fragment);
+    if (builderSummary) {
+      const layers = builderState.zones.reduce((total, zone) => total + zone.layers.length, 0);
+      builderSummary.textContent = builderState.zones.length
+        ? `${builderState.zones.length} zone${builderState.zones.length === 1 ? "" : "s"} · ${layers} velocity layer${layers === 1 ? "" : "s"}`
+        : "No zones yet";
+    }
+  };
+
+  const updateBuilderZoom = (height) => {
+    builderRowHeight = clampNumber(height, 18, 72, 28);
+    builderViewport?.style.setProperty("--builder-row", `${builderRowHeight}px`);
+  };
+
+  builderViewport?.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    const rect = builderViewport.getBoundingClientRect();
+    const pointerY = event.clientY - rect.top;
+    const pitchPosition = (builderViewport.scrollTop + pointerY) / builderRowHeight;
+    updateBuilderZoom(builderRowHeight + (event.deltaY < 0 ? 4 : -4));
+    builderViewport.scrollTop = pitchPosition * builderRowHeight - pointerY;
+  }, { passive: false });
+
+  const renderLayerList = () => {
+    if (!layerList || !editingZone) return;
+    const fragment = document.createDocumentFragment();
+    for (const layer of editingZone.layers) {
+      const row = document.createElement("div");
+      row.className = "layer-row";
+      const sampleField = document.createElement("label");
+      sampleField.className = "layer-field sample-field";
+      const sampleCaption = document.createElement("span");
+      sampleCaption.textContent = "Sample";
+      const sampleButton = document.createElement("button");
+      sampleButton.type = "button";
+      sampleButton.className = "sample-pick";
+      sampleButton.textContent = layer.sample_name || "Choose WAV / FLAC";
+      sampleButton.title = layer.sample_name || "Choose sample";
+      sampleButton.addEventListener("click", () => {
+        sampleTargetLayerId = layer.id;
+        builderSamples?.click();
+      });
+      sampleField.append(sampleCaption, sampleButton);
+      row.append(sampleField);
+      const numericFields = [
+        ["velocity_low", "Velocity low", 1, 127, 1],
+        ["velocity_high", "Velocity high", 1, 127, 1],
+        ["gain_db", "Gain dB", -60, 24, 0.1],
+        ["pan", "Pan", -1, 1, 0.01],
+        ["tune_semitones", "Tune", -48, 48, 0.01],
+      ];
+      for (const [key, captionText, min, max, step] of numericFields) {
+        const field = document.createElement("label");
+        field.className = "layer-field";
+        const caption = document.createElement("span");
+        caption.textContent = captionText;
+        const input = document.createElement("input");
+        input.type = "number";
+        input.min = min;
+        input.max = max;
+        input.step = step;
+        input.value = layer[key];
+        input.addEventListener("input", () => { layer[key] = Number(input.value); });
+        field.append(caption, input);
+        row.append(field);
+      }
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "layer-remove";
+      remove.textContent = "×";
+      remove.title = "Remove layer";
+      remove.disabled = editingZone.layers.length === 1;
+      remove.addEventListener("click", () => {
+        editingZone.layers = editingZone.layers.filter((candidate) => candidate.id !== layer.id);
+        builderFiles.delete(layer.id);
+        renderLayerList();
+      });
+      row.append(remove);
+      fragment.append(row);
+    }
+    layerList.replaceChildren(fragment);
+  };
+
+  const zoneField = (selector) => zoneDialog?.querySelector(selector);
+
+  const openZoneEditor = (zone) => {
+    if (!zoneDialog) return;
+    editingZone = structuredClone(zone);
+    selectedZoneId = zone.id;
+    zoneField("[data-zone-name]").value = editingZone.name;
+    zoneField("[data-zone-low]").value = editingZone.key_low;
+    zoneField("[data-zone-high]").value = editingZone.key_high;
+    zoneField("[data-zone-root]").value = editingZone.root_key;
+    const override = zoneField("[data-zone-envelope-override]");
+    override.checked = Boolean(editingZone.envelope_override);
+    if (!editingZone.envelope_override) editingZone.envelope_override = structuredClone(builderState.envelope);
+    zoneEnvelopeHost?.setAttribute("aria-disabled", String(!override.checked));
+    renderEnvelope(zoneEnvelopeHost, editingZone.envelope_override);
+    renderLayerList();
+    zoneDialog.showModal();
+    zoneField("[data-zone-name]").focus();
+  };
+
+  const closeZoneEditor = () => {
+    editingZone = null;
+    if (zoneDialog?.open) zoneDialog.close();
+  };
+
+  zoneField("[data-zone-envelope-override]")?.addEventListener("change", (event) => {
+    zoneEnvelopeHost?.setAttribute("aria-disabled", String(!event.target.checked));
+  });
+  zoneField("[data-zone-close]")?.addEventListener("click", closeZoneEditor);
+  zoneField("[data-zone-cancel]")?.addEventListener("click", closeZoneEditor);
+  zoneDialog?.addEventListener("cancel", () => { editingZone = null; });
+  zoneField("[data-layer-add]")?.addEventListener("click", () => {
+    if (!editingZone) return;
+    const splittable = [...editingZone.layers]
+      .filter((layer) => Number(layer.velocity_high) > Number(layer.velocity_low))
+      .sort((left, right) =>
+        (right.velocity_high - right.velocity_low) - (left.velocity_high - left.velocity_low))[0];
+    if (splittable) {
+      const previousHigh = Number(splittable.velocity_high);
+      const midpoint = Math.floor((Number(splittable.velocity_low) + previousHigh) / 2);
+      splittable.velocity_high = midpoint;
+      editingZone.layers.push(newLayer(midpoint + 1, previousHigh));
+    } else {
+      editingZone.layers.push(newLayer());
+    }
+    renderLayerList();
+  });
+
+  builderSamples?.addEventListener("change", () => {
+    if (!editingZone || !sampleTargetLayerId) return;
+    const files = [...builderSamples.files];
+    if (!files.length) return;
+    const accepted = files.filter((file) => /\.(wav|wave|flac)$/i.test(file.name));
+    if (accepted.length !== files.length) {
+      setBuilderMessage("Only WAV, WAVE and FLAC samples are supported.", "error");
+    }
+    const targetIndex = editingZone.layers.findIndex((layer) => layer.id === sampleTargetLayerId);
+    accepted.forEach((file, index) => {
+      let layer = editingZone.layers[targetIndex + index];
+      if (!layer) {
+        layer = newLayer();
+        editingZone.layers.push(layer);
+      }
+      layer.sample_name = file.name;
+      builderFiles.set(layer.id, file);
+    });
+    builderSamples.value = "";
+    sampleTargetLayerId = null;
+    renderLayerList();
+  });
+
+  const readZoneFields = () => {
+    if (!editingZone) return null;
+    editingZone.name = zoneField("[data-zone-name]").value.trim() || "Untitled zone";
+    editingZone.key_low = Number(zoneField("[data-zone-low]").value);
+    editingZone.key_high = Number(zoneField("[data-zone-high]").value);
+    editingZone.root_key = Number(zoneField("[data-zone-root]").value);
+    if (!zoneField("[data-zone-envelope-override]").checked) editingZone.envelope_override = null;
+    return editingZone;
+  };
+
+  const validateZone = (zone) => {
+    if (!Number.isInteger(zone.key_low) || !Number.isInteger(zone.key_high)
+        || !Number.isInteger(zone.root_key) || zone.key_low < 0 || zone.key_high > 127
+        || zone.key_low > zone.key_high || zone.root_key < zone.key_low || zone.root_key > zone.key_high) {
+      return "The zone key range is invalid, or the root key is outside it.";
+    }
+    if (!zone.layers.length) return "The zone needs at least one velocity layer.";
+    for (const layer of zone.layers) {
+      if (!Number.isInteger(layer.velocity_low) || !Number.isInteger(layer.velocity_high)
+          || layer.velocity_low < 1 || layer.velocity_high > 127
+          || layer.velocity_low > layer.velocity_high) {
+        return `Velocity range is invalid in ${layer.sample_name || "an unassigned layer"}.`;
+      }
+      if (!Number.isFinite(layer.gain_db) || layer.gain_db < -60 || layer.gain_db > 24
+          || !Number.isFinite(layer.pan) || layer.pan < -1 || layer.pan > 1
+          || !Number.isFinite(layer.tune_semitones) || layer.tune_semitones < -48 || layer.tune_semitones > 48) {
+        return `Gain, pan or tuning is invalid in ${layer.sample_name || "an unassigned layer"}.`;
+      }
+    }
+    return null;
+  };
+
+  zoneField("[data-zone-save]")?.addEventListener("click", () => {
+    const zone = readZoneFields();
+    const error = zone && validateZone(zone);
+    if (error) {
+      setBuilderMessage(error, "error");
+      return;
+    }
+    const index = builderState.zones.findIndex((candidate) => candidate.id === zone.id);
+    if (index >= 0) builderState.zones[index] = zone;
+    else builderState.zones.push(zone);
+    selectedZoneId = zone.id;
+    persistBuilder();
+    renderBuilderZones();
+    setBuilderMessage(`Saved ${zone.name}.`, "success");
+    closeZoneEditor();
+  });
+
+  zoneField("[data-zone-delete]")?.addEventListener("click", () => {
+    if (!editingZone) return;
+    const known = builderState.zones.some((zone) => zone.id === editingZone.id);
+    if (known) {
+      for (const layer of editingZone.layers) builderFiles.delete(layer.id);
+      builderState.zones = builderState.zones.filter((zone) => zone.id !== editingZone.id);
+      selectedZoneId = null;
+      persistBuilder();
+      renderBuilderZones();
+      setBuilderMessage("Zone deleted.");
+    }
+    closeZoneEditor();
+  });
+
+  builderNewZone?.addEventListener("click", () => openZoneEditor(newZone(60)));
+  builderName?.addEventListener("input", () => {
+    builderState.name = builderName.value;
+    persistBuilder();
+  });
+
+  const slugFile = (value) => {
+    const folded = value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    return folded || "rf-instrument";
+  };
+
+  const crcTable = (() => {
+    const table = new Uint32Array(256);
+    for (let index = 0; index < 256; index += 1) {
+      let value = index;
+      for (let bit = 0; bit < 8; bit += 1) value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
+      table[index] = value >>> 0;
+    }
+    return table;
+  })();
+
+  const crc32 = (bytes) => {
+    let value = 0xffffffff;
+    for (const byte of bytes) value = crcTable[(value ^ byte) & 0xff] ^ (value >>> 8);
+    return (value ^ 0xffffffff) >>> 0;
+  };
+
+  const zipRecord = (length, writer) => {
+    const bytes = new Uint8Array(length);
+    writer(new DataView(bytes.buffer));
+    return bytes;
+  };
+
+  const makeZip = (entries) => {
+    const encoder = new TextEncoder();
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+    for (const entry of entries) {
+      const name = encoder.encode(entry.name);
+      const data = entry.data instanceof Uint8Array ? entry.data : new Uint8Array(entry.data);
+      const checksum = crc32(data);
+      const local = zipRecord(30, (view) => {
+        view.setUint32(0, 0x04034b50, true);
+        view.setUint16(4, 20, true);
+        view.setUint16(6, 0x0800, true);
+        view.setUint16(8, 0, true);
+        view.setUint32(14, checksum, true);
+        view.setUint32(18, data.length, true);
+        view.setUint32(22, data.length, true);
+        view.setUint16(26, name.length, true);
+      });
+      const localOffset = offset;
+      localParts.push(local, name, data);
+      offset += local.length + name.length + data.length;
+      const central = zipRecord(46, (view) => {
+        view.setUint32(0, 0x02014b50, true);
+        view.setUint16(4, 20, true);
+        view.setUint16(6, 20, true);
+        view.setUint16(8, 0x0800, true);
+        view.setUint16(10, 0, true);
+        view.setUint32(16, checksum, true);
+        view.setUint32(20, data.length, true);
+        view.setUint32(24, data.length, true);
+        view.setUint16(28, name.length, true);
+        view.setUint32(42, localOffset, true);
+      });
+      centralParts.push(central, name);
+    }
+    const centralSize = centralParts.reduce((total, part) => total + part.length, 0);
+    const end = zipRecord(22, (view) => {
+      view.setUint32(0, 0x06054b50, true);
+      view.setUint16(8, entries.length, true);
+      view.setUint16(10, entries.length, true);
+      view.setUint32(12, centralSize, true);
+      view.setUint32(16, offset, true);
+    });
+    return new Blob([...localParts, ...centralParts, end], { type: "application/vnd.rackforge.bank+zip" });
+  };
+
+  const validateBuilder = () => {
+    const name = builderState.name.trim();
+    if (!name) return { error: "Give the instrument a name before exporting." };
+    if (!builderState.zones.length) return { error: "Add at least one key zone before exporting." };
+    const files = [];
+    let totalBytes = 0;
+    for (const zone of builderState.zones) {
+      const zoneError = validateZone(zone);
+      if (zoneError) return { error: `${zone.name}: ${zoneError}` };
+      for (const layer of zone.layers) {
+        const file = builderFiles.get(layer.id);
+        if (!file) return { error: `${zone.name}: choose the sample for ${layer.sample_name || "every velocity layer"}.` };
+        totalBytes += file.size;
+        files.push([layer, file]);
+      }
+    }
+    if (totalBytes > SAMPLE_LIMIT_BYTES) {
+      return { error: "This instrument exceeds the 160 MB decoded-sample limit." };
+    }
+    return { name, files };
+  };
+
+  builderExport?.addEventListener("click", async () => {
+    const validation = validateBuilder();
+    if (validation.error) {
+      setBuilderMessage(validation.error, "error");
+      return;
+    }
+    builderExport.disabled = true;
+    setBuilderMessage("Packing instrument and samples…");
+    try {
+      const instrumentSlug = slugFile(validation.name);
+      const usedNames = new Set();
+      const sampleEntries = [];
+      const sampleNames = new Map();
+      for (const [layer, file] of validation.files) {
+        const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^a-z0-9._-]+/gi, "-") || "sample";
+        const extension = file.name.match(/\.[^.]+$/)?.[0].toLowerCase() || ".wav";
+        let name = `${stem}${extension}`;
+        let suffix = 2;
+        while (usedNames.has(name.toLowerCase())) name = `${stem}-${suffix++}${extension}`;
+        usedNames.add(name.toLowerCase());
+        sampleNames.set(layer.id, name);
+        sampleEntries.push({ name: `samples/${name}`, data: new Uint8Array(await file.arrayBuffer()) });
+      }
+      const instrument = {
+        schema_version: 1,
+        id: instrumentSlug,
+        name: validation.name,
+        envelope: {
+          attack_seconds: builderState.envelope.attack,
+          decay_seconds: builderState.envelope.decay,
+          sustain_level: builderState.envelope.sustain,
+          release_seconds: builderState.envelope.release,
+        },
+        zones: builderState.zones.map((zone) => ({
+          name: zone.name,
+          key_low: zone.key_low,
+          key_high: zone.key_high,
+          root_key: zone.root_key,
+          envelope_override: zone.envelope_override ? {
+            attack_seconds: zone.envelope_override.attack,
+            decay_seconds: zone.envelope_override.decay,
+            sustain_level: zone.envelope_override.sustain,
+            release_seconds: zone.envelope_override.release,
+          } : null,
+          layers: zone.layers.map((layer) => ({
+            sample: sampleNames.get(layer.id),
+            velocity_low: layer.velocity_low,
+            velocity_high: layer.velocity_high,
+            gain_db: layer.gain_db,
+            pan: layer.pan,
+            tune_semitones: layer.tune_semitones,
+          })),
+        })),
+      };
+      const encoder = new TextEncoder();
+      const entries = [
+        { name: "bank.json", data: encoder.encode(JSON.stringify({
+          schema_version: 1,
+          id: instrumentSlug,
+          name: validation.name,
+          instrument_count: 1,
+          created_by: "RF-Soundfonts Instrument Builder",
+        }, null, 2)) },
+        { name: `instruments/${instrumentSlug}.rfinstrument`, data: encoder.encode(JSON.stringify(instrument, null, 2)) },
+        ...sampleEntries,
+      ];
+      const blob = makeZip(entries);
+      if (typeof window.showSaveFilePicker === "function") {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: `${instrumentSlug}.rfbank`,
+          types: [{
+            description: "RF Instrument Bank",
+            accept: { "application/vnd.rackforge.bank+zip": [".rfbank"] },
+          }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `${instrumentSlug}.rfbank`;
+        anchor.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      }
+      setBuilderMessage(`${validation.name}.rfbank exported. Add it from the Library tab to play it.`, "success");
+    } catch (error) {
+      setBuilderMessage(error instanceof Error ? error.message : "The RF Bank could not be exported.", "error");
+    } finally {
+      builderExport.disabled = false;
+    }
+  });
+
+  if (builderViewport) {
+    builderName.value = builderState.name;
+    renderEnvelope(globalEnvelopeHost, builderState.envelope, persistBuilder);
+    renderBuilderKeys();
+    renderBuilderZones();
+    updateBuilderZoom(builderRowHeight);
+    document.querySelector('[data-tab="builder"]')?.addEventListener("click", () => {
+      if (builderDidInitialScroll) return;
+      builderDidInitialScroll = true;
+      window.requestAnimationFrame(() => {
+        builderViewport.scrollTop = (127 - 72) * builderRowHeight;
+      });
+    });
+  }
+
   window.addEventListener("message", (event) => {
     if (
       event.origin !== hostOrigin ||

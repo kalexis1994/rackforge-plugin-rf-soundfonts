@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "rackforge-rf-soundfonts"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "hound",
  "rackforge-plugin-api",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "rackforge-rf-soundfonts-portable"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "base64",
  "image",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "rf-soundfonts"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "alsa",
  "anyhow",

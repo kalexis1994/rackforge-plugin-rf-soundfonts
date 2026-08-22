@@ -39,6 +39,204 @@ struct BankManifest {
     name: String,
 }
 
+#[derive(Clone, Copy, Deserialize)]
+struct RfEnvelope {
+    #[serde(default)]
+    attack_seconds: f32,
+    #[serde(default = "default_decay")]
+    decay_seconds: f32,
+    #[serde(default = "default_sustain")]
+    sustain_level: f32,
+    #[serde(default = "default_release")]
+    release_seconds: f32,
+}
+
+#[derive(Deserialize)]
+struct RfLayer {
+    sample: String,
+    #[serde(default = "default_velocity_low")]
+    velocity_low: u8,
+    #[serde(default = "default_velocity_high")]
+    velocity_high: u8,
+    #[serde(default)]
+    gain_db: f32,
+    #[serde(default)]
+    pan: f32,
+    #[serde(default)]
+    tune_semitones: f32,
+    #[serde(default)]
+    sample_start: usize,
+}
+
+#[derive(Deserialize)]
+struct RfZone {
+    #[serde(default)]
+    name: String,
+    key_low: u8,
+    key_high: u8,
+    root_key: u8,
+    #[serde(default)]
+    envelope_override: Option<RfEnvelope>,
+    #[serde(default)]
+    layers: Vec<RfLayer>,
+}
+
+#[derive(Deserialize)]
+struct RfInstrument {
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    artwork: Option<String>,
+    envelope: RfEnvelope,
+    #[serde(default)]
+    zones: Vec<RfZone>,
+}
+
+fn default_decay() -> f32 {
+    0.15
+}
+fn default_sustain() -> f32 {
+    1.0
+}
+fn default_release() -> f32 {
+    0.35
+}
+fn default_velocity_low() -> u8 {
+    1
+}
+fn default_velocity_high() -> u8 {
+    127
+}
+
+impl Default for RfEnvelope {
+    fn default() -> Self {
+        Self {
+            attack_seconds: 0.0,
+            decay_seconds: default_decay(),
+            sustain_level: default_sustain(),
+            release_seconds: default_release(),
+        }
+    }
+}
+
+impl RfEnvelope {
+    fn validate(self, context: &str) -> Result<NkiEnvelope, String> {
+        let values = [
+            self.attack_seconds,
+            self.decay_seconds,
+            self.sustain_level,
+            self.release_seconds,
+        ];
+        if values.iter().any(|value| !value.is_finite())
+            || !(0.0..=30.0).contains(&self.attack_seconds)
+            || !(0.0..=30.0).contains(&self.decay_seconds)
+            || !(0.0..=1.0).contains(&self.sustain_level)
+            || !(0.0..=30.0).contains(&self.release_seconds)
+        {
+            return Err(format!("{context} has an invalid envelope"));
+        }
+        Ok(NkiEnvelope {
+            attack_seconds: self.attack_seconds,
+            hold_seconds: 0.0,
+            decay_seconds: self.decay_seconds,
+            sustain_level: self.sustain_level,
+            release_seconds: self.release_seconds,
+        })
+    }
+}
+
+impl RfInstrument {
+    fn into_document(self, fallback_name: &str) -> Result<(String, String, NkiDocument), String> {
+        if self.schema_version > 1 {
+            return Err("this RF instrument schema is newer than the plugin".into());
+        }
+        let name = if self.name.trim().is_empty() {
+            fallback_name.to_string()
+        } else {
+            self.name.trim().to_string()
+        };
+        let id = if self.id.trim().is_empty() {
+            slug(&name)
+        } else {
+            slug(&self.id)
+        };
+        let global_envelope = self.envelope.validate("RF instrument")?;
+        let mut groups = vec![Some(global_envelope)];
+        let mut zones = Vec::new();
+        for (zone_index, zone) in self.zones.into_iter().enumerate() {
+            let zone_label = if zone.name.trim().is_empty() {
+                format!("RF zone {}", zone_index + 1)
+            } else {
+                format!("RF zone {:?}", zone.name.trim())
+            };
+            if zone.key_low > zone.key_high
+                || zone.key_high > 127
+                || zone.root_key < zone.key_low
+                || zone.root_key > zone.key_high
+            {
+                return Err(format!("{zone_label} has an invalid key range"));
+            }
+            let group = if let Some(envelope) = zone.envelope_override {
+                groups.push(Some(envelope.validate(&zone_label)?));
+                groups.len() - 1
+            } else {
+                0
+            };
+            if zone.layers.is_empty() {
+                return Err(format!("{zone_label} has no velocity layers"));
+            }
+            for (layer_index, layer) in zone.layers.into_iter().enumerate() {
+                if layer.sample.trim().is_empty()
+                    || layer.velocity_low == 0
+                    || layer.velocity_low > layer.velocity_high
+                    || layer.velocity_high > 127
+                    || !layer.gain_db.is_finite()
+                    || !layer.pan.is_finite()
+                    || !layer.tune_semitones.is_finite()
+                    || !(-60.0..=24.0).contains(&layer.gain_db)
+                    || !(-1.0..=1.0).contains(&layer.pan)
+                    || !(-48.0..=48.0).contains(&layer.tune_semitones)
+                {
+                    return Err(format!("{zone_label} layer {} is invalid", layer_index + 1));
+                }
+                zones.push(NkiZone {
+                    sample: basename(layer.sample.trim()).to_string(),
+                    key_low: zone.key_low,
+                    key_high: zone.key_high,
+                    root_key: zone.root_key,
+                    velocity_low: layer.velocity_low,
+                    velocity_high: layer.velocity_high,
+                    sample_start: layer.sample_start,
+                    group,
+                    volume: 10.0_f32.powf(layer.gain_db / 20.0),
+                    pan: layer.pan,
+                    tune: 2.0_f32.powf(layer.tune_semitones / 12.0),
+                    sample_loop: None,
+                });
+            }
+        }
+        if zones.is_empty() {
+            return Err("RF instrument has no playable zones".into());
+        }
+        Ok((
+            id,
+            name.clone(),
+            NkiDocument {
+                name,
+                wallpaper: self.artwork.map(|value| basename(value.trim()).to_string()),
+                zones,
+                groups,
+                group_lfos: BTreeMap::new(),
+                effects: Default::default(),
+            },
+        ))
+    }
+}
+
 #[derive(Clone)]
 struct InstrumentEntry {
     id: String,
@@ -51,6 +249,12 @@ struct InstrumentEntry {
 struct SampleEntry {
     archive_index: usize,
     expanded_bytes: u64,
+}
+
+#[derive(Clone, Copy)]
+enum MapKind {
+    Nki,
+    Rf,
 }
 
 pub struct Library {
@@ -199,7 +403,9 @@ impl Library {
             if basename(&name).eq_ignore_ascii_case("bank.json") {
                 manifest_index.get_or_insert(index);
             } else if folded_extension == "nki" {
-                map_entries.push((name, index));
+                map_entries.push((name, index, MapKind::Nki));
+            } else if folded_extension == "rfinstrument" {
+                map_entries.push((name, index, MapKind::Rf));
             } else if matches!(folded_extension.as_str(), "wav" | "wave" | "flac") {
                 let key = basename(&name).to_ascii_lowercase();
                 let candidate = SampleEntry {
@@ -253,12 +459,35 @@ impl Library {
         map_entries.sort_by(|left, right| left.0.cmp(&right.0));
         let mut instruments = Vec::new();
         let mut used_ids = BTreeSet::new();
-        for (path, index) in map_entries {
+        for (path, index, kind) in map_entries {
             let map_bytes = read_entry(&mut archive, index, MAX_MAP_BYTES)?;
-            let text = rf_soundfonts::nki::document::inflate(&map_bytes)
-                .map_err(|error| format!("{}: {error}", basename(&path)))?;
-            let (document, _) = rf_soundfonts::nki::document::parse(&text)
-                .map_err(|error| format!("{}: {error}", basename(&path)))?;
+            let fallback = basename(&path)
+                .rsplit_once('.')
+                .map_or(basename(&path), |(stem, _)| stem);
+            let (source_id, name, document, id_prefix) = match kind {
+                MapKind::Nki => {
+                    let text = rf_soundfonts::nki::document::inflate(&map_bytes)
+                        .map_err(|error| format!("{}: {error}", basename(&path)))?;
+                    let (document, _) = rf_soundfonts::nki::document::parse(&text)
+                        .map_err(|error| format!("{}: {error}", basename(&path)))?;
+                    let name = if document.name.trim().is_empty() {
+                        fallback.to_string()
+                    } else {
+                        document.name.trim().to_string()
+                    };
+                    (slug(&name), name, document, "nki")
+                }
+                MapKind::Rf => {
+                    let instrument =
+                        serde_json::from_slice::<RfInstrument>(&map_bytes).map_err(|error| {
+                            format!("{}: invalid RF instrument: {error}", basename(&path))
+                        })?;
+                    let (id, name, document) = instrument
+                        .into_document(fallback)
+                        .map_err(|error| format!("{}: {error}", basename(&path)))?;
+                    (id, name, document, "rf")
+                }
+            };
             if document.zones.is_empty() {
                 continue;
             }
@@ -282,15 +511,7 @@ impl Library {
                     examples
                 ));
             }
-            let fallback = basename(&path)
-                .rsplit_once('.')
-                .map_or(basename(&path), |(stem, _)| stem);
-            let name = if document.name.trim().is_empty() {
-                fallback.to_string()
-            } else {
-                document.name.trim().to_string()
-            };
-            let base_id = slug(&name);
+            let base_id = source_id;
             let mut unique_id = base_id.clone();
             let mut suffix = 2;
             while !used_ids.insert(unique_id.clone()) {
@@ -316,7 +537,7 @@ impl Library {
                         .and_then(|name| artwork_data_url(&bytes, name).ok())
                 });
             instruments.push(InstrumentEntry {
-                id: format!("nki.{unique_id}"),
+                id: format!("{id_prefix}.{unique_id}"),
                 name,
                 document,
                 artwork_data_url,
@@ -800,6 +1021,7 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn slugs_are_stable_and_safe() {
@@ -812,6 +1034,123 @@ mod tests {
     fn path_helpers_accept_both_separators() {
         assert_eq!(basename("Samples/Accordion\\C4.WAV"), "C4.WAV");
         assert_eq!(extension("C4.WAV"), "WAV");
+    }
+
+    #[test]
+    fn rf_zone_envelope_is_inherited_or_overridden_as_a_unit() {
+        let instrument: RfInstrument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "id": "glass-piano",
+            "name": "Glass Piano",
+            "envelope": {
+                "attack_seconds": 0.01,
+                "decay_seconds": 0.2,
+                "sustain_level": 0.8,
+                "release_seconds": 0.4
+            },
+            "zones": [
+                {
+                    "name": "Soft C4",
+                    "key_low": 60,
+                    "key_high": 63,
+                    "root_key": 60,
+                    "layers": [{ "sample": "soft.wav", "velocity_low": 1, "velocity_high": 80 }]
+                },
+                {
+                    "name": "Hard E4",
+                    "key_low": 64,
+                    "key_high": 67,
+                    "root_key": 64,
+                    "envelope_override": {
+                        "attack_seconds": 0.5,
+                        "decay_seconds": 0.3,
+                        "sustain_level": 0.6,
+                        "release_seconds": 1.2
+                    },
+                    "layers": [{ "sample": "hard.wav", "velocity_low": 81, "velocity_high": 127 }]
+                }
+            ]
+        }))
+        .unwrap();
+        let (id, name, document) = instrument.into_document("fallback").unwrap();
+        assert_eq!(id, "glass-piano");
+        assert_eq!(name, "Glass Piano");
+        assert_eq!(document.groups.len(), 2);
+        assert_eq!(document.zones[0].group, 0);
+        assert_eq!(document.zones[1].group, 1);
+        assert_eq!(document.groups[1].unwrap().attack_seconds, 0.5);
+    }
+
+    #[test]
+    fn rf_bank_with_native_instrument_map_is_playable() {
+        let mut wave = Vec::new();
+        let frames = 960_u32;
+        let data_bytes = frames * 2;
+        wave.extend_from_slice(b"RIFF");
+        wave.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wave.extend_from_slice(b"WAVEfmt ");
+        wave.extend_from_slice(&16_u32.to_le_bytes());
+        wave.extend_from_slice(&1_u16.to_le_bytes());
+        wave.extend_from_slice(&1_u16.to_le_bytes());
+        wave.extend_from_slice(&48_000_u32.to_le_bytes());
+        wave.extend_from_slice(&96_000_u32.to_le_bytes());
+        wave.extend_from_slice(&2_u16.to_le_bytes());
+        wave.extend_from_slice(&16_u16.to_le_bytes());
+        wave.extend_from_slice(b"data");
+        wave.extend_from_slice(&data_bytes.to_le_bytes());
+        for frame in 0..frames {
+            let sample =
+                ((frame as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 12_000.0) as i16;
+            wave.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let cursor = Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("bank.json", options).unwrap();
+        archive
+            .write_all(br#"{"schema_version":1,"id":"builder-test","name":"Builder Test"}"#)
+            .unwrap();
+        archive
+            .start_file("instruments/builder-test.rfinstrument", options)
+            .unwrap();
+        archive
+            .write_all(
+                br#"{
+            "schema_version": 1,
+            "id": "builder-test",
+            "name": "Builder Test",
+            "envelope": {
+                "attack_seconds": 0.0,
+                "decay_seconds": 0.1,
+                "sustain_level": 1.0,
+                "release_seconds": 0.1
+            },
+            "zones": [{
+                "name": "Middle C",
+                "key_low": 60,
+                "key_high": 60,
+                "root_key": 60,
+                "layers": [{
+                    "sample": "tone.wav",
+                    "velocity_low": 1,
+                    "velocity_high": 127
+                }]
+            }]
+        }"#,
+            )
+            .unwrap();
+        archive.start_file("samples/tone.wav", options).unwrap();
+        archive.write_all(&wave).unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+
+        let mut player = Player::from_bytes(bytes, 48_000).unwrap();
+        assert_eq!(player.first_id(), "rf.builder-test");
+        assert!(player.load_preset("rf.builder-test"));
+        player.dispatch_midi(0x90, 60, 100);
+        let mut output = vec![0.0; 960 * 2];
+        player.render(&mut output, 2, 0, 960, 1.0, 0.0);
+        assert!(output.iter().any(|sample| sample.abs() > 0.01));
     }
 
     #[test]

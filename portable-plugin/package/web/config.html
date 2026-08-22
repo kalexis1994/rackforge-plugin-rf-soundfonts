@@ -22,6 +22,8 @@
                   aria-controls="panel-library" aria-selected="true" data-tab="library">Library</button>
           <button class="tab" type="button" role="tab" id="tab-bank"
                   aria-controls="panel-bank" aria-selected="false" tabindex="-1" data-tab="bank">Active library</button>
+          <button class="tab" type="button" role="tab" id="tab-builder"
+                  aria-controls="panel-builder" aria-selected="false" tabindex="-1" data-tab="builder">Builder</button>
         </div>
         <div class="tabpanels">
           <section class="tabpanel" role="tabpanel" id="panel-library"
@@ -59,10 +61,89 @@
               </div>
             </div>
           </section>
+          <section class="tabpanel builder-panel" role="tabpanel" id="panel-builder"
+                   aria-labelledby="tab-builder" data-panel="builder" hidden>
+            <div class="builder-toolbar">
+              <label class="builder-name">
+                <span>Instrument</span>
+                <input type="text" maxlength="80" value="My RF Instrument" data-builder-name>
+              </label>
+              <div class="builder-actions">
+                <button type="button" data-builder-new-zone>New zone</button>
+                <button type="button" class="primary-action" data-builder-export>Export RF Bank</button>
+              </div>
+            </div>
+            <section class="builder-envelope" aria-labelledby="builder-envelope-title">
+              <div>
+                <strong id="builder-envelope-title">Instrument envelope</strong>
+                <span>Zones inherit this ADSR unless they explicitly override it.</span>
+              </div>
+              <div class="builder-adsr" data-global-envelope></div>
+            </section>
+            <div class="builder-map-heading">
+              <div>
+                <strong>Key zones</strong>
+                <span data-builder-summary>No zones yet</span>
+              </div>
+              <span>Ctrl + wheel to zoom · Double-click a zone to edit</span>
+            </div>
+            <div class="builder-viewport" data-builder-viewport tabindex="0"
+                 aria-label="Vertical keyboard zone editor">
+              <div class="builder-map" data-builder-map>
+                <div class="builder-keys" data-builder-keys></div>
+                <div class="builder-lane" data-builder-lane></div>
+              </div>
+            </div>
+            <div class="builder-message" role="status" aria-live="polite" data-builder-message>
+              Add a zone, assign one or more velocity layers, then export the instrument as an RF Bank.
+            </div>
+            <input type="file" accept=".wav,.wave,.flac,audio/wav,audio/flac" multiple hidden data-builder-samples>
+          </section>
         </div>
       </section>
       <footer><span>HOST-MANAGED ACCESS</span><span>NO NATIVE PATH EXPOSED</span></footer>
     </main>
+    <dialog class="zone-dialog" data-zone-dialog aria-labelledby="zone-dialog-title">
+      <div class="zone-dialog-shell">
+        <header class="zone-dialog-header">
+          <div>
+            <span>RF ZONE</span>
+            <strong id="zone-dialog-title">Edit zone</strong>
+          </div>
+          <button type="button" aria-label="Close zone editor" data-zone-close>×</button>
+        </header>
+        <div class="zone-dialog-body">
+          <div class="zone-fields">
+            <label><span>Name</span><input type="text" maxlength="64" data-zone-name></label>
+            <label><span>Low key</span><input type="number" min="0" max="127" data-zone-low></label>
+            <label><span>High key</span><input type="number" min="0" max="127" data-zone-high></label>
+            <label><span>Root key</span><input type="number" min="0" max="127" data-zone-root></label>
+          </div>
+          <label class="override-switch">
+            <input type="checkbox" data-zone-envelope-override>
+            <span>Override instrument envelope for this zone</span>
+          </label>
+          <div class="builder-adsr zone-adsr" data-zone-envelope></div>
+          <section class="layer-editor">
+            <div class="layer-heading">
+              <div>
+                <strong>Velocity layers</strong>
+                <span>Each layer selects its own sample and velocity range.</span>
+              </div>
+              <button type="button" data-layer-add>Add layer</button>
+            </div>
+            <div class="layer-list" data-layer-list></div>
+          </section>
+        </div>
+        <footer class="zone-dialog-actions">
+          <button type="button" class="danger-action" data-zone-delete>Delete zone</button>
+          <div>
+            <button type="button" data-zone-cancel>Cancel</button>
+            <button type="button" class="primary-action" data-zone-save>Save zone</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
     <script src="app.js" defer></script>
   </body>
 </html>
