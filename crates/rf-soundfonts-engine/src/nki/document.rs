@@ -94,11 +94,68 @@ pub struct NkiZone {
 #[derive(Clone, Debug, Default)]
 pub struct NkiDocument {
     pub name: String,
+    /// Kontakt performance-view wallpaper, reduced to its portable file name.
+    pub wallpaper: Option<String>,
     pub zones: Vec<NkiZone>,
     /// Envelope of each group, in document order. A group that declares no
     /// modulator driving volume holds `None`, and its zones take the
     /// renderer's default rather than a shape invented here.
     pub groups: Vec<Option<NkiEnvelope>>,
+    /// Audible DSP translated from Kontakt's group and program insert racks.
+    pub effects: NkiEffects,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NkiEffects {
+    /// Ordered insert chain for each Kontakt group.
+    pub group_filters: BTreeMap<usize, Vec<NkiFilter>>,
+    pub program: Vec<NkiProgramEffect>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NkiFilter {
+    LowPass2 {
+        /// Kontakt's normalised cutoff value, from 0.0 to 1.0.
+        cutoff: f32,
+        resonance: f32,
+    },
+    HighPass2 {
+        /// Kontakt's normalised cutoff value, from 0.0 to 1.0.
+        cutoff: f32,
+        resonance: f32,
+    },
+    PeakEq {
+        frequency_hz: f32,
+        bandwidth_octaves: f32,
+        gain_db: f32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NkiProgramEffect {
+    Reverb(NkiReverb),
+    Delay(NkiDelay),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NkiReverb {
+    pub pre_delay_ms: f32,
+    pub room_size: f32,
+    pub width: f32,
+    pub color: f32,
+    pub damping: f32,
+    pub wet_gain: f32,
+    pub dry_gain: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NkiDelay {
+    pub time_ms: f32,
+    pub feedback: f32,
+    pub panning: f32,
+    pub damping: f32,
+    pub wet_gain: f32,
+    pub dry_gain: f32,
 }
 
 /// Inflates the document inside a `.nki`.
@@ -232,8 +289,15 @@ pub fn parse(text: &str) -> Result<(NkiDocument, usize), SoundfontError> {
                 if element.name().as_ref() != b"V" {
                     continue;
                 }
+                let pair = value_pair(&element);
+                if pair.0.as_deref() == Some("wallpaperFile") {
+                    if document.wallpaper.is_none() {
+                        document.wallpaper = pair.1.as_deref().and_then(resource_name);
+                    }
+                    continue;
+                }
                 if in_envelope || in_modulator {
-                    let (Some(name), Some(value)) = value_pair(&element) else {
+                    let (Some(name), Some(value)) = pair else {
                         continue;
                     };
                     if in_envelope {
@@ -248,30 +312,7 @@ pub fn parse(text: &str) -> Result<(NkiDocument, usize), SoundfontError> {
                 let Some(values) = current.as_mut() else {
                     continue;
                 };
-                let mut name = None;
-                let mut value = None;
-                // `unescape_value` is deprecated in favour of an API that
-                // needs an entity resolver this document does not use. Its
-                // behaviour — resolving the five predefined XML entities — is
-                // exactly what a file name containing an ampersand needs.
-                #[allow(deprecated)]
-                for attribute in element.attributes().flatten() {
-                    match attribute.key.as_ref() {
-                        b"name" => {
-                            name = attribute
-                                .unescape_value()
-                                .ok()
-                                .map(|text| text.into_owned())
-                        }
-                        b"value" => {
-                            value = attribute
-                                .unescape_value()
-                                .ok()
-                                .map(|text| text.into_owned())
-                        }
-                        _ => {}
-                    }
-                }
+                let (name, value) = pair;
                 if let (Some(name), Some(value)) = (name, value) {
                     // First writer wins. A zone's own parameters appear before
                     // the nested modulator tables that reuse names like
@@ -329,6 +370,7 @@ pub fn parse(text: &str) -> Result<(NkiDocument, usize), SoundfontError> {
             "Kontakt instrument declares no playable zones".into(),
         ));
     }
+    document.effects = parse_effects(text)?;
     Ok((document, skipped))
 }
 
@@ -355,6 +397,184 @@ fn value_pair(element: &quick_xml::events::BytesStart<'_>) -> (Option<String>, O
         }
     }
     (name, value)
+}
+
+#[derive(Clone, Copy)]
+enum EffectScope {
+    ProgramInsert,
+    ProgramSend,
+    GroupInsert(usize),
+}
+
+struct EffectDraft {
+    scope: EffectScope,
+    kind: Option<String>,
+    kind_type: Option<String>,
+    values: BTreeMap<String, String>,
+}
+
+/// Reads the bounded subset of Kontakt DSP that the resident player can
+/// reproduce faithfully. Routing-only `SendLevels` nodes are intentionally
+/// ignored; program sends are retained by Kontakt as separate buses and are
+/// not inserts unless another node actually feeds them.
+fn parse_effects(text: &str) -> Result<NkiEffects, SoundfontError> {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut effects = NkiEffects::default();
+    let mut scope = None;
+    let mut draft: Option<EffectDraft> = None;
+    let mut current_group = None;
+    let mut next_group = 0_usize;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => match element.name().as_ref() {
+                b"K2_Group" => {
+                    #[allow(deprecated)]
+                    let explicit_index = element
+                        .attributes()
+                        .flatten()
+                        .find(|attribute| attribute.key.as_ref() == b"index")
+                        .and_then(|attribute| attribute.unescape_value().ok())
+                        .and_then(|value| value.parse::<usize>().ok());
+                    let group = explicit_index.unwrap_or(next_group);
+                    current_group = Some(group);
+                    next_group = next_group.max(group.saturating_add(1));
+                }
+                b"ProgramInsertFX" => scope = Some(EffectScope::ProgramInsert),
+                b"ProgramSendFX" => scope = Some(EffectScope::ProgramSend),
+                b"GroupInsertFX" => {
+                    scope = current_group.map(EffectScope::GroupInsert);
+                }
+                b"K2_Effect" => {
+                    draft = scope.map(|scope| EffectDraft {
+                        scope,
+                        kind: None,
+                        kind_type: None,
+                        values: BTreeMap::new(),
+                    });
+                }
+                b"Reverb" | b"Delay" | b"Filter" if draft.is_some() => {
+                    let value = draft.as_mut().unwrap();
+                    value.kind =
+                        Some(String::from_utf8_lossy(element.name().as_ref()).into_owned());
+                    #[allow(deprecated)]
+                    for attribute in element.attributes().flatten() {
+                        if attribute.key.as_ref() == b"type"
+                            && let Ok(text) = attribute.unescape_value()
+                        {
+                            value.kind_type = Some(text.into_owned());
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Empty(element)) if element.name().as_ref() == b"V" => {
+                if let Some(draft) = draft.as_mut()
+                    && let (Some(name), Some(value)) = value_pair(&element)
+                {
+                    draft.values.entry(name).or_insert(value);
+                }
+            }
+            Ok(Event::End(element)) => match element.name().as_ref() {
+                b"K2_Effect" => {
+                    if let Some(draft) = draft.take() {
+                        append_effect(&mut effects, draft);
+                    }
+                }
+                b"ProgramInsertFX" | b"ProgramSendFX" | b"GroupInsertFX" => scope = None,
+                b"K2_Group" => current_group = None,
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(error) => {
+                return Err(SoundfontError::Invalid(format!(
+                    "Kontakt effects are not valid XML: {error}"
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(effects)
+}
+
+fn append_effect(effects: &mut NkiEffects, draft: EffectDraft) {
+    if draft
+        .values
+        .get("bypass")
+        .is_some_and(|value| value == "yes")
+    {
+        return;
+    }
+    let number = |name: &str, fallback: f32| {
+        draft
+            .values
+            .get(name)
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(fallback)
+    };
+    match (
+        draft.scope,
+        draft.kind.as_deref(),
+        draft.kind_type.as_deref(),
+    ) {
+        (EffectScope::ProgramInsert, Some("Reverb"), _) => {
+            effects.program.push(NkiProgramEffect::Reverb(NkiReverb {
+                pre_delay_ms: number("preDelay", 0.0).clamp(0.0, 200.0),
+                room_size: number("roomsize", 0.5).clamp(0.0, 1.0),
+                width: number("stereo", 0.8).clamp(0.0, 1.0),
+                color: number("color", 0.5).clamp(0.0, 1.0),
+                damping: number("filter", 0.5).clamp(0.0, 1.0),
+                wet_gain: number("outLevel", 1.0).clamp(0.0, 4.0),
+                dry_gain: number("outLevelDry", 1.0).clamp(0.0, 4.0),
+            }));
+        }
+        (EffectScope::ProgramInsert, Some("Delay"), _) => {
+            effects.program.push(NkiProgramEffect::Delay(NkiDelay {
+                time_ms: number("time", 250.0).clamp(1.0, 2_000.0),
+                feedback: number("feedback", 0.25).clamp(0.0, 0.95),
+                panning: number("panning", 0.0).clamp(-1.0, 1.0),
+                damping: number("damping", 0.0).clamp(0.0, 1.0),
+                wet_gain: number("outLevel", 1.0).clamp(0.0, 4.0),
+                dry_gain: number("outLevelDry", 1.0).clamp(0.0, 4.0),
+            }));
+        }
+        (EffectScope::GroupInsert(group), Some("Filter"), Some("lp2pole")) => {
+            effects
+                .group_filters
+                .entry(group)
+                .or_default()
+                .push(NkiFilter::LowPass2 {
+                    cutoff: number("cutoff", 1.0).clamp(0.0, 1.0),
+                    resonance: number("resonance", 0.0).clamp(0.0, 1.0),
+                });
+        }
+        (EffectScope::GroupInsert(group), Some("Filter"), Some("hp2pole")) => {
+            effects
+                .group_filters
+                .entry(group)
+                .or_default()
+                .push(NkiFilter::HighPass2 {
+                    cutoff: number("cutoff", 0.0).clamp(0.0, 1.0),
+                    resonance: number("resonance", 0.0).clamp(0.0, 1.0),
+                });
+        }
+        (EffectScope::GroupInsert(group), Some("Filter"), Some("eq1band")) => {
+            effects
+                .group_filters
+                .entry(group)
+                .or_default()
+                .push(NkiFilter::PeakEq {
+                    frequency_hz: number("freq_1", 1_000.0).clamp(20.0, 20_000.0),
+                    bandwidth_octaves: number("bandWidth_1", 1.0).clamp(0.05, 8.0),
+                    gain_db: number("gain_1", 0.0).clamp(-24.0, 24.0),
+                });
+        }
+        // Program sends need a send-level source to become audible. Merely
+        // declaring the destination reverb does not put it in the insert path.
+        _ => {}
+    }
 }
 
 /// Builds an envelope from the stage times a modulator states.
@@ -441,6 +661,12 @@ fn zone_from(values: &BTreeMap<String, String>) -> Option<NkiZone> {
 /// useless — they are absolute paths from the machine that saved the
 /// instrument, and will not exist on the one playing it.
 fn sample_name(raw: &str) -> Option<String> {
+    resource_name(raw)
+}
+
+/// Recovers the final portable name from either a Kontakt serialised path or
+/// a conventional path. Samples and wallpapers use the same encoding.
+fn resource_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -686,6 +912,9 @@ mod tests {
     fn zones_are_read_in_document_order() {
         let text = r#"<?xml version="1.0"?>
 <K2_Container>
+  <Parameters>
+    <V name="wallpaperFile" value="@d018AcordClari Samplesd009WallpaperF00000016000Acordeon III.tga"/>
+  </Parameters>
   <Zones>
     <K2_Zone index="0">
       <Parameters><V name="lowKey" value="0"/><V name="highKey" value="59"/></Parameters>
@@ -702,6 +931,60 @@ mod tests {
         assert_eq!(document.zones.len(), 2);
         assert_eq!(document.zones[0].sample, "low.wav");
         assert_eq!(document.zones[1].sample, "high.wav");
+        assert_eq!(document.wallpaper.as_deref(), Some("Acordeon III.tga"));
+    }
+
+    #[test]
+    fn audible_insert_effects_keep_their_scope_and_order() {
+        let text = r#"<K2_Container>
+  <ProgramInsertFX>
+    <K2_Effect index="0"><V name="outLevel" value="0.4"/><V name="outLevelDry" value="1"/>
+      <Reverb><V name="preDelay" value="25"/><V name="roomsize" value="0.75"/>
+        <V name="stereo" value="0.8"/><V name="color" value="0.5"/><V name="filter" value="0.5"/></Reverb>
+    </K2_Effect>
+    <K2_Effect index="1"><V name="outLevel" value="0.1"/><V name="outLevelDry" value="1"/>
+      <Delay><V name="time" value="321"/><V name="feedback" value="0.4"/>
+        <V name="panning" value="0.2"/><V name="damping" value="0.2"/></Delay>
+    </K2_Effect>
+  </ProgramInsertFX>
+  <Groups><K2_Group index="0"><GroupInsertFX><K2_Effect index="0">
+    <Filter type="lp2pole"><V name="cutoff" value="0.125"/><V name="resonance" value="0.1"/></Filter>
+  </K2_Effect><K2_Effect index="1">
+    <Filter type="hp2pole"><V name="cutoff" value="0.05"/><V name="resonance" value="0.2"/></Filter>
+  </K2_Effect></GroupInsertFX></K2_Group></Groups>
+  <Zones><K2_Zone groupIdx="0"><Sample><V name="file_ex2" value="note.wav"/></Sample></K2_Zone></Zones>
+</K2_Container>"#;
+        let (document, _) = parse(text).unwrap();
+        assert_eq!(document.effects.program.len(), 2);
+        assert!(matches!(
+            document.effects.program[0],
+            NkiProgramEffect::Reverb(NkiReverb {
+                pre_delay_ms: 25.0,
+                room_size: 0.75,
+                ..
+            })
+        ));
+        assert!(matches!(
+            document.effects.program[1],
+            NkiProgramEffect::Delay(NkiDelay {
+                time_ms: 321.0,
+                feedback: 0.4,
+                ..
+            })
+        ));
+        assert_eq!(
+            document.effects.group_filters.get(&0),
+            Some(&vec![
+                NkiFilter::LowPass2 {
+                    cutoff: 0.125,
+                    resonance: 0.1,
+                },
+                NkiFilter::HighPass2 {
+                    cutoff: 0.05,
+                    resonance: 0.2,
+                }
+            ])
+        );
     }
 
     /// A document of two groups, each with its own volume envelope, plus the
@@ -892,7 +1175,7 @@ mod tests {
                     .filter(|zone| zone.sample_loop.is_some())
                     .count();
                 eprintln!(
-                    "{:34} zonas={:3} saltadas={} teclas={}..{} looped={}",
+                    "{:34} zones={:3} skipped={} keys={}..{} looped={}",
                     path.file_stem().unwrap().to_string_lossy(),
                     document.zones.len(),
                     skipped,
@@ -913,7 +1196,7 @@ mod tests {
             }
         }
         assert!(found > 0, "no .nki files were found");
-        eprintln!("instrumentos leídos: {found}");
+        eprintln!("instruments read: {found}");
     }
 
     #[test]

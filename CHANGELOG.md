@@ -3,6 +3,150 @@
 All user-visible changes to the RF-Soundfonts plugin. Versions follow the
 plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
+## 0.5.12 — 2026-08-21
+
+### Changed
+
+- Detailed effect parameters now render as a single vertical list with one
+  full-width control per row.
+- Parameter names, faders, and numeric values have dedicated columns so values
+  remain aligned and never overlap adjacent text.
+
+## 0.5.11 — 2026-08-21
+
+### Changed
+
+- The PLAY output heading now uses a narrow fixed column and smaller type,
+  leaving more horizontal room for faders and effect controls.
+- Long bank-provided channel labels truncate with an ellipsis and expose their
+  full value as a hover tooltip.
+
+## 0.5.10 — 2026-08-21
+
+### Changed
+
+- PLAY now remains constrained to the RackForge plugin viewport. The instrument
+  rack scrolls internally when effect controls need more vertical space.
+- Bank artwork, title, description, and metadata form a compact upper strip so
+  the output and effect controls remain the visual and functional focus.
+
+## 0.5.9 — 2026-08-21
+
+### Changed
+
+- The active RF effect module in PLAY expands in place for detailed editing and
+  keeps MIX available in its compact header.
+- RF Reverb exposes size, decay, pre-delay, damping, and stereo width. RF Delay
+  exposes time, feedback, damping, and stereo crossfeed.
+- Advanced effect controls are automatable, smoothed in the DSP, bounded for
+  feedback safety, and reset relative to each instrument's authored program.
+
+## 0.5.7 — 2026-08-21
+
+### Changed
+
+- PLAY now presents every previously added instrument library in a modern tree
+  browser and activates libraries without returning to CONFIG.
+- Libraries with multiple instruments expose them as nested variants; a
+  single-instrument library remains one compact top-level item.
+- CONFIG remains the only surface that can add, browse, clear, or otherwise
+  administer library resources.
+
+## 0.5.6 — 2026-08-21
+
+### Changed
+
+- Removed the decorative piano keyboard from PLAY so the shared instrument
+  surface does not imply a particular instrument family.
+- The wet-effect fader now names the loaded effect explicitly: **RF Reverb
+  Mix**, **RF Delay Mix**, or **RF Reverb + Delay Mix**.
+
+## 0.5.5 — 2026-08-21
+
+### Changed
+
+- Imported formats no longer expose third-party format or product branding in
+  PLAY, CONFIG, catalog descriptions, errors, or package metadata. Every loaded
+  source is presented consistently as an RF-Soundfonts instrument.
+
+## 0.5.4 — 2026-08-21
+
+### Changed
+
+- CONFIG treats imported files as an added library collection rather than a
+  one-time replacement choice. The **Add library** action remains visible.
+- Previously added native file grants are listed and can be loaded again;
+  restoring the factory piano no longer hides or forgets the collection.
+
+## 0.5.3 — 2026-08-21
+
+### Changed
+
+- CONFIG now opens a filtered instrument selector instead of asking the user
+  to authorize and browse a source folder.
+- Direct instrument selections automatically gather sibling samples and artwork into
+  the private validated resource; the temporary archive stays invisible.
+
+## 0.5.2 — 2026-08-20
+
+### Fixed
+
+- Large legacy PCM instruments no longer exhaust Wasmtime's control-call
+  fuel during `resource_end`. The tolerant WAV path now uses specialized,
+  allocation-checked 8/16/24/32-bit conversion loops instead of a generic
+  per-byte iterator.
+- RackForge's new `validate-resource` diagnostic exercises the same empty
+  sandbox and control-call budget used by the resource backend, catching
+  failures that native Rust tests cannot reproduce.
+
+## 0.5.1 — 2026-08-20
+
+### Fixed
+
+- Direct instrument installation now ships under a new immutable package version,
+  ensuring RackForge cannot retain an earlier `0.5.0` WebAssembly component
+  while CONFIG uses the newer dependency-bundling flow.
+- Added an end-to-end regression that delivers each single-instrument RF
+  bundle through `resource_begin`, `resource_write`, and `resource_end`.
+
+### Added
+
+- Legacy HP2 high-pass group filters with cutoff, resonance, stable
+  12 dB/octave processing, and frequency-response verification.
+
+## 0.5.0 — 2026-08-20
+
+### Added
+
+- Portable playback for imported RF instruments backed
+  by ordinary WAV, WAVE, or FLAC samples.
+- A self-contained RF bank archive format and converter, so RackForge can
+  install an entire instrument library as one
+  private resource without exposing native paths to the WebAssembly plugin.
+- Sample-accurate note events with sustain pedal, pitch bend, modulation,
+  per-zone key and velocity ranges, loops, start offsets, tuning, level, pan,
+  and amplitude envelopes.
+- Direct instrument installation on native RackForge hosts: the host gathers the
+  selected map and its sibling dependencies without exposing a filesystem path
+  to the portable processor. Missing referenced samples reject the install.
+- Instrument artwork in TGA, PNG, or JPEG form is converted to bounded JPEG
+  artwork and rendered as the selected instrument's bank-owned PLAY background.
+- Native, real-time-safe effect translation: two-pole low-pass and
+  parametric EQ filters retain their group scope, while ordered program insert
+  racks reproduce reverb and stereo delay with bounded feedback and memory.
+- An automatable **FX Amount** control in PLAY scales an instrument's wet reverb/delay
+  signal without changing its direct voice, envelopes, or group filters.
+
+### Changed
+
+- CONFIG now discovers compatible RF instrument files. The existing user-bank
+  resource remains in place, so SoundFont installation and restoration stay
+  backward compatible.
+- RF instrument archives are indexed at load time, while only the selected
+  instrument's referenced samples are decoded into memory.
+- PLAY describes each instrument's decoded effect topology and only shows the FX
+  control for instruments that actually contain a wet program effect.
+
 ## 0.4.1 — 2026-08-20
 
 ### Changed

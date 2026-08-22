@@ -17,16 +17,16 @@
         <aside class="sound-browser" data-sound-browser aria-label="Sound browser">
           <div class="browser-heading">
             <div>
-              <span class="section-kicker">LIBRARY</span>
-              <strong>Instruments</strong>
+              <span class="section-kicker">COLLECTION</span>
+              <strong>Libraries</strong>
             </div>
             <span class="sound-count" data-sound-count>0 SOUNDS</span>
           </div>
           <label class="sound-search">
-            <span>Search instruments</span>
-            <input type="search" autocomplete="off" placeholder="Search sounds…" data-sound-search>
+            <span>Search libraries and instruments</span>
+            <input type="search" autocomplete="off" placeholder="Search libraries or sounds…" data-sound-search>
           </label>
-          <div class="sound-list" data-sound-list role="listbox" aria-label="Available sounds"></div>
+          <div class="sound-list" data-sound-list role="tree" aria-label="Available instrument libraries"></div>
         </aside>
 
         <section class="instrument-rack" aria-label="Loaded instrument" data-bank-shell data-bank-layout="studio">
@@ -50,7 +50,7 @@
               <p class="subtitle" data-sound-subtitle>The default RackForge acoustic piano.</p>
               <div class="display-meta">
                 <span data-active-bank>Factory bank</span>
-                <span data-active-format>SF2</span>
+                <span data-active-format>RF INSTRUMENT</span>
               </div>
             </div>
           </div>
@@ -60,15 +60,39 @@
               <span class="section-kicker" data-bank-control-kicker>CHANNEL</span>
               <strong data-bank-control-title>Output</strong>
             </div>
-            <div class="volume-card">
-              <label for="master-volume">MASTER</label>
-              <input id="master-volume" type="range" min="0" max="1" step="0.01"
-                     value="0.9" data-volume disabled>
-              <output data-volume-value>—</output>
+            <div class="control-stack">
+              <div class="volume-card">
+                <label for="master-volume">MASTER</label>
+                <input id="master-volume" type="range" min="0" max="1" step="0.01"
+                       value="0.9" data-volume disabled>
+                <output data-volume-value>—</output>
+              </div>
+              <div class="fx-card" data-fx-card hidden>
+                <div class="fx-summary">
+                  <button class="fx-toggle" type="button" data-fx-toggle aria-expanded="false"
+                          aria-controls="fx-editor">
+                    <span data-fx-label>RF EFFECT</span>
+                    <small data-fx-action>EDIT</small>
+                    <i aria-hidden="true">›</i>
+                  </button>
+                  <label for="fx-amount">MIX</label>
+                  <input id="fx-amount" type="range" min="0" max="1" step="0.01"
+                         value="1" data-fx-amount disabled>
+                  <output data-fx-amount-value>—</output>
+                </div>
+                <div class="fx-editor" id="fx-editor" data-fx-editor hidden>
+                  <div class="fx-editor-heading">
+                    <div>
+                      <span class="section-kicker">RF EFFECT ENGINE</span>
+                      <strong>Effect parameters</strong>
+                    </div>
+                    <button type="button" data-fx-reset>RESET</button>
+                  </div>
+                  <div class="fx-parameter-grid" data-fx-parameters></div>
+                </div>
+              </div>
             </div>
           </div>
-
-          <div class="keyboard" data-bank-module="keyboard" aria-hidden="true"></div>
         </section>
       </section>
       <footer><span data-bank-footer>RACKFORGE INSTRUMENT</span><span data-bank-credit>FREEPATS · CC BY 3.0</span></footer>

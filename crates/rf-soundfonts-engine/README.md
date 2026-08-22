@@ -1,36 +1,36 @@
-# RF-Soundfonts engine (prueba)
+# RF-Soundfonts engine (preview)
 
-Motor para el subconjunto inicial de Downloadable Sounds Level 1/2 que necesita
-RackForge. DLS estandariza el contenedor y el comportamiento del sintetizador,
-pero no obliga a que dos colecciones tengan los mismos instrumentos, muestras,
-regiones, loops o articulaciones. Tampoco garantiza un mapa General MIDI salvo
-que el banco se declare compatible con GM.
+Engine for the initial Downloadable Sounds Level 1/2 subset required by
+RackForge. DLS standardizes the container and synthesizer behavior, but does
+not require two collections to contain the same instruments, samples, regions,
+loops, or articulations. It also does not guarantee a General MIDI map unless
+the bank declares itself GM-compatible.
 
-El repositorio no incluye bancos DLS ni contenido extraído de ellos.
+The repository does not include DLS banks or content extracted from them.
 
-La primera etapa soporta:
+The initial implementation supports:
 
-- colecciones RIFF `DLS `;
-- tabla `ptbl` y pool `wvpl`;
-- instrumentos, regiones de nota/velocidad y enlaces de onda;
-- ondas mono PCM16;
-- afinación `wsmp` con corrección fina signed, atenuación y loops;
-- envolvente EG1 en centibeles desde `art1`/`art2`;
-- envolvente de pitch EG2, incluida la profundidad `EG2 → Pitch`;
-- LFO DLS con frecuencia, delay y profundidad de pitch/atenuación controlada por `CC1`;
-- render offline a 48 kHz;
-- reproducción MIDI de baja latencia hacia ALSA en Linux ARM64.
+- RIFF `DLS ` collections;
+- the `ptbl` table and `wvpl` pool;
+- instruments, note/velocity regions, and wave links;
+- mono PCM16 waves;
+- `wsmp` tuning with signed fine correction, attenuation, and loops;
+- the EG1 envelope in centibels from `art1`/`art2`;
+- the EG2 pitch envelope, including `EG2 → Pitch` depth;
+- DLS LFO frequency, delay, and `CC1`-controlled pitch/attenuation depth;
+- offline rendering at 48 kHz;
+- low-latency MIDI playback through ALSA on Linux ARM64.
 
-Todavía no se interpretan todos los destinos de articulación de DLS-2, filtros,
-matrices de modulación, formatos de onda distintos de PCM16 mono ni chunks
-propietarios. Un banco que use esas capacidades puede ser DLS válido y aun así
-quedar fuera de la compatibilidad actual de RF-Soundfonts.
+Not every DLS-2 articulation destination, filter, modulation matrix, wave
+format other than mono PCM16, or proprietary chunk is interpreted yet. A bank
+that uses those capabilities can be valid DLS and still fall outside the
+current RF-Soundfonts compatibility range.
 
 ```text
-cargo run --release -- inspect /ruta/banco.dls
-cargo run --release -- render /ruta/banco.dls 0 0 60 piano-c4.wav
-rf-soundfonts-live --bank 0 --program 0 /ruta/banco.dls
+cargo run --release -- inspect /path/to/bank.dls
+cargo run --release -- render /path/to/bank.dls 0 0 60 piano-c4.wav
+rf-soundfonts-live --bank 0 --program 0 /path/to/bank.dls
 ```
 
-Los bancos son recursos aportados por el usuario y deben contar con una
-licencia que permita su uso en el dispositivo de destino.
+Banks are user-provided resources and must have a license that permits their
+use on the target device.

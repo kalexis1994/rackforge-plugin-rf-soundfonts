@@ -1,7 +1,8 @@
 # RF-Soundfonts
 
 RF-Soundfonts is a portable RackForge instrument plugin built around the
-RustySynth SoundFont engine. Its factory program is the openly licensed
+RustySynth SoundFont engine and RF's resident sample engine. Its factory
+program is the openly licensed
 **YDP Grand Piano**, so RackForge can provide a playable instrument without
 requiring proprietary ROMs or platform-specific binaries.
 
@@ -30,25 +31,50 @@ The plugin package contains:
 
 ## Using the plugin
 
-Out of the box the plugin plays the YDP Grand Piano. To play your own
-SoundFonts:
+Out of the box the plugin plays the YDP Grand Piano. To add your own RF
+instruments:
 
 1. Open the plugin's **CONFIG** surface from RackForge's Plugins section and
-   press **Select folder**. RackForge opens its own folder picker; the plugin
-   never sees a native path.
-2. Browse the authorized folder and pick a `.sf2` file. RackForge installs it
-   into the plugin's private storage, so it keeps playing after a restart.
-   Compressed `.sf3` banks are not supported.
-3. The **PLAY** surface keeps a stable browser and performance frame, while the
+   press **Add library** and choose an instrument file. RF-Soundfonts never
+   receives a native path.
+2. RF-Soundfonts asks RackForge to gather the selected instrument plus its
+   sibling samples and artwork into one validated private resource. This is
+   automatic and remains available after a restart.
+3. CONFIG keeps every added source in a reusable library list. **Add library**
+   remains available after each import; choosing a listed library makes it the
+   active instrument without forgetting the others.
+4. The **PLAY** surface keeps a stable browser and performance frame, while the
    active bank supplies the artwork, palette, wording and supported internal
    composition of its instrument stage. Banks without a presentation manifest
    receive a neutral SoundFont fallback instead of inheriting another bank's
    identity.
-4. **Restore factory bank** in CONFIG uses a two-step confirmation before
-   removing the installed bank and returning to the factory piano.
+5. **Restore factory bank** in CONFIG uses a two-step confirmation before
+   returning to the factory piano. Added libraries remain in the list.
 
 Freely licensed SoundFonts are available from
 [FreePats](https://freepats.zenvoid.org/) and other community collections.
+
+### Imported RF instruments
+
+Imported instruments may use ordinary WAV, WAVE, or FLAC samples. Referenced
+TGA, PNG, and JPEG artwork is validated, converted to a bounded web image, and
+shown by PLAY. If any referenced sample is missing, installation is rejected.
+
+Supported RF signal processing keeps the source instrument's scope and order:
+two-pole low-pass/high-pass and one-band parametric EQ run per voice/group
+before mixing, then program insert reverb and stereo delay process the mixed instrument. The DSP
+uses bounded delay memory, guarded feedback and finite-value protection for
+stable real-time playback. PLAY exposes an automatable **FX Amount** control
+when the selected instrument has a wet effect; 100% preserves the bank setting and 0%
+keeps the direct sound while the internal effect tail remains ready.
+
+An RF bank remains useful as a transferable, browser-installable archive and
+as the foundation for RF-authored instruments.
+
+The converter preserves the folder structure, includes every compatible
+instrument map, sample and artwork file, and writes a small `bank.json`. The
+plugin keeps the compressed archive in memory but decodes only the samples used
+by the selected instrument.
 
 ## Bank-owned presentation
 
@@ -108,7 +134,7 @@ tooling without deploy keys or repository secrets.
 
 ## Compatibility
 
-RF-Soundfonts `0.4.1` targets RackForge Plugin API `1.7`, the portable
+RF-Soundfonts `0.5.12` targets RackForge Plugin API `1.7`, the portable
 `wasm-v1` runtime, and the `little@1` controller surface. RackForge SDK sources
 and package tooling remain pinned to tested Git revisions for reproducible
 builds.

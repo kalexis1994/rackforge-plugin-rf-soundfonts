@@ -1169,6 +1169,22 @@ impl Voice {
         self.pitch_envelope.note_off();
     }
 
+    /// Starts playback at a frame selected by the source instrument.
+    ///
+    /// Kontakt uses this for zones whose recorded attack has been trimmed in
+    /// the instrument map. Keeping the validation here makes the same resident
+    /// voice safe for any future format that exposes a sample offset.
+    pub fn start_at_frame(&mut self, frame: usize) -> Result<(), SoundfontError> {
+        if frame >= self.frame_count {
+            return Err(SoundfontError::Invalid(format!(
+                "sample start {frame} is outside a {} frame wave",
+                self.frame_count
+            )));
+        }
+        self.position = frame as f64;
+        Ok(())
+    }
+
     /// Silences the voice over `seconds` instead of cutting it dead.
     ///
     /// Removing a sounding voice from the pool drops its output from whatever

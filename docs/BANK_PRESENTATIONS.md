@@ -70,10 +70,11 @@ profile's `banks/` tree or the plugin's validated `branding/` tree. Copy fields,
 profile counts, match arrays and path shapes are bounded by the renderer.
 Unknown fields have no effect.
 
-## External SoundFonts
+## External banks
 
-A plain `.sf2` has no standard for arbitrary artwork or UI layout. This release
-therefore renders installed external SoundFonts with the neutral fallback.
-Supporting portable user-authored presentation bundles requires a RackForge
-host contract for installing and serving bank-owned private assets; it must not
-be emulated by accepting arbitrary HTML or JavaScript from a bank archive.
+A plain `.sf2` has no standard for arbitrary artwork or UI layout, so installed
+external SoundFonts use the neutral fallback. Imported RF instrument maps may
+name artwork; an RF bank carries that image beside its samples, and the processor
+converts it to a small bounded JPEG data image for the matching sound. This is
+artwork only—never HTML, CSS, or JavaScript. A richer RF-authored presentation
+bundle will require a broader validated schema and host asset contract.

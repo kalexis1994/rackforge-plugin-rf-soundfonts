@@ -513,19 +513,19 @@ mod real_files {
                     paths.len(),
                 );
                 for path in paths.iter().take(3) {
-                    eprintln!("      ruta: {path}");
+                    eprintln!("      path: {path}");
                 }
                 for program in &programs {
                     let placed = program.zones.iter().filter(|z| z.file.is_some()).count();
                     let looped: usize = program.zones.iter().map(|z| z.loops.len()).sum();
                     eprintln!(
-                        "      {:22} {:4} zonas ({placed} con sample, {looped} loops)",
+                        "      {:22} {:4} zones ({placed} with samples, {looped} loops)",
                         program.name,
                         program.zones.len(),
                     );
                     for zone in program.zones.iter().take(2) {
                         eprintln!(
-                            "         teclas {}..{} vel {}..{} raiz {} archivo {:?} {}Hz {}ch",
+                            "         keys {}..{} vel {}..{} root {} file {:?} {}Hz {}ch",
                             zone.key_low,
                             zone.key_high,
                             zone.velocity_low,
@@ -540,7 +540,7 @@ mod real_files {
                 seen += 1;
             }
         }
-        eprintln!("contenedores leidos: {seen}");
+        eprintln!("containers read: {seen}");
         assert!(seen > 0, "found no Kontakt files");
     }
 }

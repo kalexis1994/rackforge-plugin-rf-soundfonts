@@ -9,16 +9,15 @@
       "structure": "#408a71"
     },
     "copy": {
-      "edition": "SOUNDFONT BANK",
+      "edition": "RF INSTRUMENT",
       "kicker": "LOADED INSTRUMENT",
       "control_kicker": "CHANNEL",
       "control_title": "Output",
       "engine": "WASM · 96 VOICES",
       "footer": "RACKFORGE INSTRUMENT",
-      "credit": "SF2 · PORTABLE"
+      "credit": "RF-SOUNDFONTS"
     },
-    "modules": ["instrument", "controls", "keyboard"],
-    "keyboard": true
+    "modules": ["instrument", "controls"]
   },
   "profiles": ["banks/ydp-grand-piano/presentation.json"]
 }

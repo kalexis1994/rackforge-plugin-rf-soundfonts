@@ -453,7 +453,7 @@ mod real_library {
             .expect("set RF_SOUNDFONTS_ROOT to the installed sfz directory");
         let (library, failures) = SfzLibrary::load(std::path::Path::new(&root));
         for failure in &failures {
-            eprintln!("  aviso: {failure}");
+            eprintln!("  warning: {failure}");
         }
         let mut current = String::new();
         for loaded in library.instruments() {
@@ -463,7 +463,7 @@ mod real_library {
             }
             let summary = loaded.instrument.summary();
             eprintln!(
-                "   {:26} grabado {:>3}-{:<3} alcanza {:>3}-{:<3} {:>4} zonas {:>4} samples {:>2} capas {:>4} MiB{}",
+                "   {:26} mapped {:>3}-{:<3} reaches {:>3}-{:<3} {:>4} zones {:>4} samples {:>2} layers {:>4} MiB{}",
                 loaded.name,
                 summary.root_low,
                 summary.root_high,

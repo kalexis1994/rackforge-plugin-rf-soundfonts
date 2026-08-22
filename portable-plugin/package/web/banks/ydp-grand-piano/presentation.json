@@ -22,6 +22,5 @@
     "footer": "YDP GRAND PIANO",
     "credit": "FREEPATS · CC BY 3.0"
   },
-  "modules": ["artwork", "instrument", "controls", "keyboard"],
-  "keyboard": true
+  "modules": ["artwork", "instrument", "controls"]
 }
