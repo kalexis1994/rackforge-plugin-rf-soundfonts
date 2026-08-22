@@ -68,6 +68,10 @@ stable real-time playback. PLAY exposes an automatable **FX Amount** control
 when the selected instrument has a wet effect; 100% preserves the bank setting and 0%
 keeps the direct sound while the internal effect tail remains ready.
 
+Kontakt triangle pitch LFOs are retained per group, including their frequency,
+delay, direct pitch depth, and MIDI CC route for performance-controlled
+vibrato. Controller values are tracked independently per MIDI channel.
+
 An RF bank remains useful as a transferable, browser-installable archive and
 as the foundation for RF-authored instruments.
 
@@ -134,7 +138,7 @@ tooling without deploy keys or repository secrets.
 
 ## Compatibility
 
-RF-Soundfonts `0.5.12` targets RackForge Plugin API `1.7`, the portable
+RF-Soundfonts `0.5.13` targets RackForge Plugin API `1.7`, the portable
 `wasm-v1` runtime, and the `little@1` controller surface. RackForge SDK sources
 and package tooling remain pinned to tested Git revisions for reproducible
 builds.

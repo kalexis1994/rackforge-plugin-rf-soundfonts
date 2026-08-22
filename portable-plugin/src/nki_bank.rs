@@ -65,12 +65,15 @@ struct Region {
     zone: NkiZone,
     wave_index: usize,
     envelope: EnvelopeSpec,
+    lfo: LfoSpec,
+    modulation_cc: Option<u8>,
     filters: Vec<NkiFilter>,
 }
 
 struct ActiveVoice {
     channel: usize,
     voice: Voice,
+    modulation_cc: Option<u8>,
     filters: Vec<StereoBiquad>,
 }
 
@@ -81,7 +84,7 @@ struct LoadedInstrument {
     held: [[bool; 128]; 16],
     sustain: [bool; 16],
     pitch_bend_cents: [f32; 16],
-    modulation: [f32; 16],
+    controllers: [[f32; 128]; 16],
     effects: EffectRack,
 }
 
@@ -413,10 +416,20 @@ impl Library {
                 .map_or_else(EnvelopeSpec::default, envelope_from);
             let mut envelope = envelope;
             envelope.release_seconds = envelope.release_seconds.max(MINIMUM_RELEASE_SECONDS);
+            let group_lfo = instrument.document.group_lfos.get(&zone.group).copied();
             regions.push(Region {
                 zone: zone.clone(),
                 wave_index,
                 envelope,
+                lfo: group_lfo.map_or_else(LfoSpec::default, |lfo| LfoSpec {
+                    frequency_hz: lfo.frequency_hz,
+                    delay_seconds: lfo.delay_seconds,
+                    pitch_depth_cents: lfo.pitch_depth_cents,
+                    mod_wheel_pitch_depth_cents: lfo.controller_pitch_depth_cents,
+                    attenuation_depth_centibels: 0.0,
+                    mod_wheel_attenuation_depth_centibels: 0.0,
+                }),
+                modulation_cc: group_lfo.and_then(|lfo| lfo.controller),
                 filters: instrument
                     .document
                     .effects
@@ -441,7 +454,7 @@ impl Library {
             held: [[false; 128]; 16],
             sustain: [false; 16],
             pitch_bend_cents: [0.0; 16],
-            modulation: [0.0; 16],
+            controllers: [[0.0; 128]; 16],
             effects,
         })
     }
@@ -538,7 +551,7 @@ impl LoadedInstrument {
         self.held = [[false; 128]; 16];
         self.sustain = [false; 16];
         self.pitch_bend_cents = [0.0; 16];
-        self.modulation = [0.0; 16];
+        self.controllers = [[0.0; 128]; 16];
         self.effects.reset();
     }
 
@@ -580,7 +593,7 @@ impl LoadedInstrument {
             let config = VoiceConfig {
                 amplitude_envelope: region.envelope,
                 pitch_envelope: PitchEnvelopeSpec::default(),
-                lfo: LfoSpec::default(),
+                lfo: region.lfo,
                 pitch_offset_cents: 1_200.0 * zone.tune.max(f32::MIN_POSITIVE).log2(),
                 pitch_bend_range_cents: 200.0,
                 modulation_depth: 1.0,
@@ -598,6 +611,7 @@ impl LoadedInstrument {
             self.voices.push(ActiveVoice {
                 channel,
                 voice,
+                modulation_cc: region.modulation_cc,
                 filters: region
                     .filters
                     .iter()
@@ -626,34 +640,36 @@ impl LoadedInstrument {
                 }
             }
             0x90 => self.note_on(channel, first, second, sample_rate),
-            0xb0 => match first {
-                1 => self.modulation[channel] = f32::from(second) / 127.0,
-                64 => {
-                    let was_down = self.sustain[channel];
-                    self.sustain[channel] = second >= 64;
-                    if was_down && !self.sustain[channel] {
-                        for note in 0..128_u8 {
-                            if !self.held[channel][note as usize] {
-                                self.release_note(channel, note);
+            0xb0 => {
+                self.controllers[channel][usize::from(first)] = f32::from(second) / 127.0;
+                match first {
+                    64 => {
+                        let was_down = self.sustain[channel];
+                        self.sustain[channel] = second >= 64;
+                        if was_down && !self.sustain[channel] {
+                            for note in 0..128_u8 {
+                                if !self.held[channel][note as usize] {
+                                    self.release_note(channel, note);
+                                }
                             }
                         }
                     }
-                }
-                120 => {
-                    for active in &mut self.voices {
-                        if active.channel == channel {
-                            active.voice.fade_out(0.005);
+                    120 => {
+                        for active in &mut self.voices {
+                            if active.channel == channel {
+                                active.voice.fade_out(0.005);
+                            }
                         }
                     }
-                }
-                123 => {
-                    for note in 0..128_u8 {
-                        self.held[channel][note as usize] = false;
-                        self.release_note(channel, note);
+                    123 => {
+                        for note in 0..128_u8 {
+                            self.held[channel][note as usize] = false;
+                            self.release_note(channel, note);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             0xe0 => {
                 let value = u16::from(first) | (u16::from(second) << 7);
                 self.pitch_bend_cents[channel] = (f32::from(value) - 8_192.0) / 8_192.0 * 200.0;
@@ -675,9 +691,12 @@ impl LoadedInstrument {
             let mut mixed = [0.0_f32; 2];
             for active in &mut self.voices {
                 let channel = active.channel;
+                let modulation = active.modulation_cc.map_or(0.0, |controller| {
+                    self.controllers[channel][usize::from(controller)]
+                });
                 let mut value = active
                     .voice
-                    .next_frame_modulated(self.pitch_bend_cents[channel], self.modulation[channel]);
+                    .next_frame_modulated(self.pitch_bend_cents[channel], modulation);
                 for filter in &mut active.filters {
                     value = filter.process(value);
                 }
@@ -816,13 +835,13 @@ mod tests {
             .count();
         assert_eq!(artwork_count, 5);
         let expected_effects = BTreeMap::from([
-            ("AcordClari", (1, 2)),
-            ("Sanfona - Original-2", (1, 0)),
-            ("Hohner Colombiano", (1, 0)),
-            ("Hohner Student 72", (1, 0)),
-            ("Pollo Acord", (2, 1)),
-            ("AcordSaban", (1, 1)),
-            ("AcordSeles", (0, 3)),
+            ("AcordClari", (1, 2, 2)),
+            ("Sanfona - Original-2", (1, 0, 0)),
+            ("Hohner Colombiano", (1, 0, 0)),
+            ("Hohner Student 72", (1, 0, 0)),
+            ("Pollo Acord", (2, 1, 1)),
+            ("AcordSaban", (1, 1, 1)),
+            ("AcordSeles", (0, 3, 3)),
         ]);
         for instrument in &player.library.instruments {
             let expected = expected_effects
@@ -837,10 +856,11 @@ mod tests {
                         .group_filters
                         .values()
                         .map(Vec::len)
-                        .sum()
+                        .sum(),
+                    instrument.document.group_lfos.len(),
                 ),
                 *expected,
-                "wrong effect topology for {}",
+                "wrong DSP/modulation topology for {}",
                 instrument.name
             );
         }

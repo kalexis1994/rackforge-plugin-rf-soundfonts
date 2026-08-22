@@ -3,6 +3,20 @@
 All user-visible changes to the RF-Soundfonts plugin. Versions follow the
 plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
+## 0.5.13 — 2026-08-22
+
+### Added
+
+- Kontakt triangle pitch LFOs now retain their group frequency, delay, direct
+  depth, and MIDI CC-controlled intensity route.
+- The portable player tracks all MIDI CC values per channel so an authored
+  vibrato route is not limited to a hard-coded global controller.
+
+### Verified
+
+- The seven-instrument accordion suite preserves seven LFOs across its authored
+  groups while loading all 245 samples and rendering every instrument.
+
 ## 0.5.12 — 2026-08-21
 
 ### Changed

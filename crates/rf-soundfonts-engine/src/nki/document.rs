@@ -101,8 +101,19 @@ pub struct NkiDocument {
     /// modulator driving volume holds `None`, and its zones take the
     /// renderer's default rather than a shape invented here.
     pub groups: Vec<Option<NkiEnvelope>>,
+    /// First supported pitch LFO in each Kontakt group.
+    pub group_lfos: BTreeMap<usize, NkiLfo>,
     /// Audible DSP translated from Kontakt's group and program insert racks.
     pub effects: NkiEffects,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NkiLfo {
+    pub frequency_hz: f32,
+    pub delay_seconds: f32,
+    pub pitch_depth_cents: f32,
+    pub controller: Option<u8>,
+    pub controller_pitch_depth_cents: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -370,6 +381,7 @@ pub fn parse(text: &str) -> Result<(NkiDocument, usize), SoundfontError> {
             "Kontakt instrument declares no playable zones".into(),
         ));
     }
+    document.group_lfos = parse_group_lfos(text)?;
     document.effects = parse_effects(text)?;
     Ok((document, skipped))
 }
@@ -397,6 +409,216 @@ fn value_pair(element: &quick_xml::events::BytesStart<'_>) -> (Option<String>, O
         }
     }
     (name, value)
+}
+
+#[derive(Default)]
+struct LfoDraft {
+    group: usize,
+    index: usize,
+    waveform: Option<String>,
+    target: Option<String>,
+    target_intensity: f32,
+    frequency_hz: Option<f32>,
+    delay_ms: Option<f32>,
+    bypassed: bool,
+}
+
+#[derive(Default)]
+struct LfoControllerDraft {
+    group: usize,
+    source: Option<String>,
+    controller: Option<u8>,
+    target: Option<String>,
+    target_object: Option<usize>,
+    intensity: f32,
+    bypassed: bool,
+}
+
+/// Kontakt serialises pitch intensities as a fraction of one octave. The real
+/// maps make the scale observable: their pitch-bend assignment is 0.166667 and
+/// is authored as the conventional two-semitone range.
+const KONTAKT_PITCH_UNIT_CENTS: f32 = 1_200.0;
+
+fn attribute(element: &quick_xml::events::BytesStart<'_>, expected: &[u8]) -> Option<String> {
+    #[allow(deprecated)]
+    element.attributes().flatten().find_map(|attribute| {
+        (attribute.key.as_ref() == expected)
+            .then(|| {
+                attribute
+                    .unescape_value()
+                    .ok()
+                    .map(|value| value.into_owned())
+            })
+            .flatten()
+    })
+}
+
+fn finite_number(value: &str) -> Option<f32> {
+    value.parse::<f32>().ok().filter(|value| value.is_finite())
+}
+
+/// Reads the group vibrato topology separately from the zone pass. Kontakt
+/// links an external MIDI controller to an internal LFO by object index, and
+/// those two nodes live in different lists, so preserving the link requires a
+/// small inventory before choosing the first supported LFO in each group.
+fn parse_group_lfos(text: &str) -> Result<BTreeMap<usize, NkiLfo>, SoundfontError> {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut current_group = None;
+    let mut next_group = 0_usize;
+    let mut internal = None::<LfoDraft>;
+    let mut external = None::<LfoControllerDraft>;
+    let mut in_target = false;
+    let mut in_lfo = false;
+    let mut lfos = BTreeMap::<(usize, usize), NkiLfo>::new();
+    let mut controllers = Vec::<LfoControllerDraft>::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => match element.name().as_ref() {
+                b"K2_Group" => {
+                    let explicit =
+                        attribute(&element, b"index").and_then(|value| value.parse::<usize>().ok());
+                    let group = explicit.unwrap_or(next_group);
+                    current_group = Some(group);
+                    next_group = next_group.max(group.saturating_add(1));
+                }
+                b"K2_IntMod" => {
+                    internal = current_group.map(|group| LfoDraft {
+                        group,
+                        index: attribute(&element, b"index")
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(0),
+                        ..LfoDraft::default()
+                    });
+                }
+                b"K2_ExtMod" => {
+                    external = current_group.map(|group| LfoControllerDraft {
+                        group,
+                        ..LfoControllerDraft::default()
+                    });
+                }
+                b"Target" if internal.is_some() || external.is_some() => in_target = true,
+                b"LFO" if internal.is_some() => {
+                    in_lfo = true;
+                    internal.as_mut().unwrap().waveform = attribute(&element, b"type");
+                }
+                _ => {}
+            },
+            Ok(Event::Empty(element)) if element.name().as_ref() == b"V" => {
+                let (Some(name), Some(value)) = value_pair(&element) else {
+                    continue;
+                };
+                if let Some(draft) = internal.as_mut() {
+                    if in_lfo {
+                        match name.as_str() {
+                            "frequency" => draft.frequency_hz = finite_number(&value),
+                            "delay" => draft.delay_ms = finite_number(&value),
+                            _ => {}
+                        }
+                    } else if in_target {
+                        match name.as_str() {
+                            "target" => draft.target = Some(value),
+                            "intensity" => {
+                                draft.target_intensity = finite_number(&value).unwrap_or(0.0)
+                            }
+                            _ => {}
+                        }
+                    } else if name == "bypass" {
+                        draft.bypassed = value == "yes";
+                    }
+                } else if let Some(draft) = external.as_mut() {
+                    if in_target {
+                        match name.as_str() {
+                            "target" => draft.target = Some(value),
+                            "targetObjIdx" => {
+                                draft.target_object = value.parse::<usize>().ok();
+                            }
+                            "intensity" => draft.intensity = finite_number(&value).unwrap_or(0.0),
+                            _ => {}
+                        }
+                    } else {
+                        match name.as_str() {
+                            "source" => draft.source = Some(value),
+                            "ccNumber" => {
+                                draft.controller = value
+                                    .parse::<u16>()
+                                    .ok()
+                                    .filter(|number| *number <= 127)
+                                    .map(|number| number as u8);
+                            }
+                            "bypass" => draft.bypassed = value == "yes",
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(element)) => match element.name().as_ref() {
+                b"Target" => in_target = false,
+                b"LFO" => in_lfo = false,
+                b"K2_IntMod" => {
+                    if let Some(draft) = internal.take()
+                        && !draft.bypassed
+                        && draft.waveform.as_deref() == Some("triangle")
+                        && draft.target.as_deref() == Some("pitch")
+                        && let Some(frequency_hz) = draft.frequency_hz
+                    {
+                        lfos.entry((draft.group, draft.index)).or_insert(NkiLfo {
+                            frequency_hz: frequency_hz.clamp(0.01, 210.0),
+                            delay_seconds: (draft.delay_ms.unwrap_or(0.0) / 1_000.0)
+                                .clamp(0.0, 60.0),
+                            pitch_depth_cents: (draft.target_intensity * KONTAKT_PITCH_UNIT_CENTS)
+                                .clamp(-4_800.0, 4_800.0),
+                            controller: None,
+                            controller_pitch_depth_cents: 0.0,
+                        });
+                    }
+                    in_target = false;
+                    in_lfo = false;
+                }
+                b"K2_ExtMod" => {
+                    if let Some(draft) = external.take() {
+                        controllers.push(draft);
+                    }
+                    in_target = false;
+                }
+                b"K2_Group" => current_group = None,
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(error) => {
+                return Err(SoundfontError::Invalid(format!(
+                    "Kontakt modulation is not valid XML: {error}"
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    for controller in controllers {
+        if controller.bypassed
+            || controller.source.as_deref() != Some("midiCC")
+            || controller.target.as_deref() != Some("intensity")
+        {
+            continue;
+        }
+        let (Some(object), Some(number)) = (controller.target_object, controller.controller) else {
+            continue;
+        };
+        if let Some(lfo) = lfos.get_mut(&(controller.group, object))
+            && lfo.controller.is_none()
+        {
+            lfo.controller = Some(number);
+            lfo.controller_pitch_depth_cents =
+                (controller.intensity * KONTAKT_PITCH_UNIT_CENTS).clamp(-4_800.0, 4_800.0);
+        }
+    }
+
+    let mut groups = BTreeMap::new();
+    for ((group, _), lfo) in lfos {
+        groups.entry(group).or_insert(lfo);
+    }
+    Ok(groups)
 }
 
 #[derive(Clone, Copy)]
@@ -1014,7 +1236,18 @@ mod tests {
             <V name="sustain" value="0.43"/><V name="release" value="25000."/>
           </Envelope>
         </K2_IntMod>
+        <K2_IntMod index="1" version="0.80">
+          <Targets><Target index="0"><V name="target" value="pitch"/><V name="intensity" value="0.01"/></Target></Targets>
+          <V name="bypass" value="no"/>
+          <LFO type="triangle"><V name="delay" value="250"/><V name="frequency" value="4.93219"/></LFO>
+        </K2_IntMod>
       </IntModulators>
+      <ExtModulators>
+        <K2_ExtMod index="2">
+          <Targets><Target index="0"><V name="target" value="intensity"/><V name="intensity" value="0.018"/><V name="targetObjIdx" value="1"/></Target></Targets>
+          <V name="source" value="midiCC"/><V name="ccNumber" value="1"/><V name="bypass" value="no"/>
+        </K2_ExtMod>
+      </ExtModulators>
     </K2_Group>
     <K2_Group index="1">
       <IntModulators>
@@ -1048,6 +1281,21 @@ mod tests {
         let second = document.groups[1].expect("the second group states an envelope");
         assert!((second.release_seconds - 0.088).abs() < 1e-6, "{second:?}");
         assert!((second.attack_seconds - 0.052).abs() < 1e-6, "{second:?}");
+    }
+
+    #[test]
+    fn a_triangle_pitch_lfo_keeps_its_midi_controller_route() {
+        let (document, _) = parse(TWO_GROUPS).unwrap();
+        let lfo = document.group_lfos.get(&0).expect("group zero has vibrato");
+        assert!((lfo.frequency_hz - 4.932_19).abs() < 1e-5, "{lfo:?}");
+        assert!((lfo.delay_seconds - 0.25).abs() < 1e-6, "{lfo:?}");
+        assert!((lfo.pitch_depth_cents - 12.0).abs() < 1e-6, "{lfo:?}");
+        assert_eq!(lfo.controller, Some(1));
+        assert!(
+            (lfo.controller_pitch_depth_cents - 21.6).abs() < 1e-4,
+            "{lfo:?}"
+        );
+        assert!(!document.group_lfos.contains_key(&1));
     }
 
     #[test]
