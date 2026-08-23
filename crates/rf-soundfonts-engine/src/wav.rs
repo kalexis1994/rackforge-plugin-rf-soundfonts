@@ -193,13 +193,13 @@ fn decode_plain_pcm(bytes: &[u8], name: &str) -> Option<Wave> {
         ),
         16 => {
             const SCALE: f32 = 1.0 / 32_768.0;
-            for raw in data.chunks_exact(2) {
+            for raw in data.as_chunks::<2>().0 {
                 samples.push(f32::from(i16::from_le_bytes([raw[0], raw[1]])) * SCALE);
             }
         }
         24 => {
             const SCALE: f32 = 1.0 / 8_388_608.0;
-            for raw in data.chunks_exact(3) {
+            for raw in data.as_chunks::<3>().0 {
                 let value = i32::from_le_bytes([
                     raw[0],
                     raw[1],
@@ -211,7 +211,7 @@ fn decode_plain_pcm(bytes: &[u8], name: &str) -> Option<Wave> {
         }
         32 => {
             const SCALE: f32 = 1.0 / 2_147_483_648.0;
-            for raw in data.chunks_exact(4) {
+            for raw in data.as_chunks::<4>().0 {
                 samples.push(i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as f32 * SCALE);
             }
         }

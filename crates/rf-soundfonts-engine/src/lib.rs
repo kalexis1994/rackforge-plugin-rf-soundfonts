@@ -684,8 +684,10 @@ fn parse_wave(chunk: &Chunk, bytes: &[u8]) -> Result<Wave, SoundfontError> {
         ));
     }
     let samples = raw
-        .chunks_exact(2)
-        .map(|sample| i16::from_le_bytes(sample.try_into().unwrap()) as f32 / 32_768.0)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|sample| i16::from_le_bytes(*sample) as f32 / 32_768.0)
         .collect::<Vec<_>>();
     if samples.is_empty() {
         return Err(SoundfontError::Invalid("wave contains no samples".into()));

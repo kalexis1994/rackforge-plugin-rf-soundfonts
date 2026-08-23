@@ -273,7 +273,9 @@ fn utf16(reader: &mut Reader<'_>) -> Result<String, SoundfontError> {
     let length = reader.u32()? as usize;
     let bytes = reader.take(length * 2)?;
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     Ok(String::from_utf16_lossy(&units))

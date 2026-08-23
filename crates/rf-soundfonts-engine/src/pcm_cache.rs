@@ -227,14 +227,14 @@ pub fn read_frames(
 
     match header.format {
         CacheFormat::Int16 => {
-            for (index, value) in scratch.chunks_exact(2).enumerate() {
+            for (index, value) in scratch.as_chunks::<2>().0.iter().enumerate() {
                 let raw = i16::from_le_bytes([value[0], value[1]]);
                 out[index] = f32::from(raw) / 32_768.0;
             }
         }
         CacheFormat::Float32 => {
-            for (index, value) in scratch.chunks_exact(4).enumerate() {
-                out[index] = f32::from_le_bytes(value.try_into().unwrap());
+            for (index, value) in scratch.as_chunks::<4>().0.iter().enumerate() {
+                out[index] = f32::from_le_bytes(*value);
             }
         }
     }
