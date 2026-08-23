@@ -3,6 +3,58 @@
 All user-visible changes to the RF-Soundfonts plugin. Versions follow the
 plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
+## 0.6.2 — 2026-08-22
+
+### Added
+
+- Creating an instrument or opening one in CONFIG's Builder now routes the
+  current draft into RackForge's live MIDI and audio path for immediate
+  audition. Merely opening the Builder tab does not change the active sound.
+- Builder and RackForge now share an explicit numeric edit-mode contract:
+  `0` keeps normal playback active and `1` targets the editable draft.
+- Builder audition follows zone, layer, sample, envelope and boundary edits,
+  reports whether it is live, syncing or awaiting a playable draft, and keeps
+  the last valid preview sounding while an edit is temporarily incomplete.
+
+### Safety
+
+- Draft banks use an ephemeral host resource preview: they are validated in a
+  replacement instance, never added to the user's library, never persisted,
+  and never replace the instance's stored resource binding.
+
+## 0.6.1 — 2026-08-22
+
+### Fixed
+
+- Builder RF Bank limits now match the portable component's effective 128 MB
+  resource ceiling, so an archive accepted by the editor is not later rejected
+  by `resource_begin` for its size.
+
+## 0.6.0 — 2026-08-22
+
+### Added
+
+- CONFIG's Builder opens existing RF Banks, validates their ZIP directory,
+  checks CRCs and size limits, and reconstructs native RF instruments, zones,
+  velocity layers, envelopes, colors and bundled WAV/FLAC samples.
+- Multi-instrument banks expose an instrument selector. Save and Save As
+  replace edited native maps while preserving inherited maps, artwork,
+  unknown entries and schema fields the current editor does not own.
+- RF Bank zones render as colored blocks with draggable, keyboard-accessible
+  shared boundaries; layer cards include local waveform previews.
+
+### Changed
+
+- Builder envelopes cover the engine's complete 0–30 second range and layer
+  volume accepts the complete -60 dB to +24 dB RF instrument range.
+- The CONFIG content area keeps adaptive spacing above its footer.
+
+### Safety
+
+- RF Bank editing rejects encrypted, multi-volume, ZIP64, path-traversing,
+  duplicate, oversized, truncated, unsupported-compression and checksum-failed
+  archives before replacing the current Builder state.
+
 ## 0.5.13 — 2026-08-22
 
 ### Added

@@ -75,6 +75,20 @@ vibrato. Controller values are tracked independently per MIDI channel.
 An RF bank remains useful as a transferable, browser-installable archive and
 as the foundation for RF-authored instruments.
 
+### Editing RF Banks
+
+CONFIG's **Builder** can create a new RF instrument or open an existing
+`.rfbank`. Native `.rfinstrument` maps become editable zones and velocity
+layers, and a bank with several native instruments exposes an instrument
+selector. **Save** writes back through a retained writable file handle when the
+host provides one; **Save As** always creates a separate bank.
+
+Saving is intentionally lossless outside the fields the Builder owns. Other
+instrument maps, artwork, samples, custom files and unknown JSON fields remain
+in the archive. Kontakt-derived `.nki` maps are preserved read-only rather than
+being rewritten by a browser editor that cannot faithfully represent every
+Kontakt feature yet. Existing WAV, WAVE and FLAC layers are supported.
+
 The converter preserves the folder structure, includes every compatible
 instrument map, sample and artwork file, and writes a small `bank.json`. The
 plugin keeps the compressed archive in memory but decodes only the samples used
@@ -138,7 +152,7 @@ tooling without deploy keys or repository secrets.
 
 ## Compatibility
 
-RF-Soundfonts `0.5.14` targets RackForge Plugin API `1.7`, the portable
+RF-Soundfonts `0.6.2` targets RackForge Plugin API `1.7`, the portable
 `wasm-v1` runtime, and the `little@1` controller surface. RackForge SDK sources
 and package tooling remain pinned to tested Git revisions for reproducible
 builds.

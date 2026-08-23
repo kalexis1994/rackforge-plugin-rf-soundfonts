@@ -8,13 +8,14 @@
 
   const requestTimeout = (method) => {
     if (method === "plugin.select_resource") return 5 * 60_000;
-    if (method === "plugin.install_resource" || method === "plugin.clear_resource") {
+    if (method === "plugin.install_resource" || method === "plugin.clear_resource"
+        || method === "plugin.preview_resource") {
       return 2 * 60_000;
     }
     return 20_000;
   };
 
-  const hostRequest = (method, params = {}) =>
+  const hostRequest = (method, params = {}, transfer = []) =>
     new Promise((resolve, reject) => {
       const requestId = `rf-soundfonts-${Date.now()}-${requestSerial += 1}`;
       const timer = window.setTimeout(() => {
@@ -28,7 +29,7 @@
         request_id: requestId,
         method,
         params,
-      }, hostOrigin);
+      }, hostOrigin, transfer);
     });
 
   window.addEventListener("pagehide", () => {
@@ -1155,21 +1156,44 @@
   const builderName = document.querySelector("[data-builder-name]");
   const builderSummary = document.querySelector("[data-builder-summary]");
   const builderMessage = document.querySelector("[data-builder-message]");
+  const builderOpen = document.querySelector("[data-builder-open]");
+  const builderOpenFile = document.querySelector("[data-builder-open-file]");
   const builderNewZone = document.querySelector("[data-builder-new-zone]");
+  const builderSave = document.querySelector("[data-builder-save]");
   const builderExport = document.querySelector("[data-builder-export]");
   const builderSamples = document.querySelector("[data-builder-samples]");
+  const builderBankContext = document.querySelector("[data-builder-bank-context]");
+  const builderBankName = document.querySelector("[data-builder-bank-name]");
+  const builderBankDetail = document.querySelector("[data-builder-bank-detail]");
+  const builderAudition = document.querySelector("[data-builder-audition]");
+  const builderInstrument = document.querySelector("[data-builder-instrument]");
+  const builderNewBank = document.querySelector("[data-builder-new-bank]");
   const globalEnvelopeHost = document.querySelector("[data-global-envelope]");
   const zoneDialog = document.querySelector("[data-zone-dialog]");
   const zoneEnvelopeHost = document.querySelector("[data-zone-envelope]");
   const layerList = document.querySelector("[data-layer-list]");
   const BUILDER_DRAFT_KEY = "rf-soundfonts.instrument-builder.v1";
   const SAMPLE_LIMIT_BYTES = 160 * 1_048_576;
+  const MAX_BANK_BYTES = 128 * 1_048_576;
+  const MAX_BANK_ENTRIES = 8_192;
+  const MAX_MAP_BYTES = 2 * 1_048_576;
+  const MAX_VOLUME_PERCENT = 100 * (10 ** (24 / 20));
   let builderRowHeight = 28;
   let selectedZoneId = null;
   let editingZone = null;
   let sampleTargetLayerId = null;
   let builderDidInitialScroll = false;
   const builderFiles = new Map();
+  const builderWaveforms = new Map();
+  const ZONE_COLORS = ["#69c89e", "#67a8ff", "#ad82f2", "#ef8e9b", "#f4b765", "#62cbd0", "#d4d875", "#d98ac8"];
+  const EDIT_MODE_OFF = 0;
+  const EDIT_MODE_ON = 1;
+  let suppressZoneClickUntil = 0;
+  let openedBank = null;
+  let builderEditMode = EDIT_MODE_OFF;
+  let builderPreviewTimer = 0;
+  let builderPreviewRevision = 0;
+  let builderPreviewBusy = false;
 
   const defaultEnvelope = () => ({ attack: 0.01, decay: 0.2, sustain: 0.8, release: 0.4 });
   const defaultBuilderState = () => ({
@@ -1196,6 +1220,14 @@
     return Number.isFinite(number) ? Math.min(high, Math.max(low, number)) : fallback;
   };
 
+  const normalizeZoneColor = (value, fallback = ZONE_COLORS[0]) =>
+    /^#[0-9a-f]{6}$/i.test(String(value || "")) ? String(value).toLowerCase() : fallback;
+
+  const zoneColorRgb = (color) => {
+    const normalized = normalizeZoneColor(color).slice(1);
+    return `${Number.parseInt(normalized.slice(0, 2), 16)}, ${Number.parseInt(normalized.slice(2, 4), 16)}, ${Number.parseInt(normalized.slice(4, 6), 16)}`;
+  };
+
   const noteName = (note) => {
     const names = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
     return `${names[note % 12]}${Math.floor(note / 12) - 1}`;
@@ -1207,6 +1239,7 @@
     } catch (_) {
       setBuilderMessage("The draft cannot be stored in this session.", "error");
     }
+    if (builderEditMode === EDIT_MODE_ON) scheduleBuilderPreview();
   };
 
   const setBuilderMessage = (message, kind = "") => {
@@ -1217,10 +1250,10 @@
   };
 
   const envelopeDefinitions = [
-    { key: "attack", label: "Attack", min: 0, max: 5, step: 0.001, unit: "s" },
-    { key: "decay", label: "Decay", min: 0, max: 5, step: 0.001, unit: "s" },
+    { key: "attack", label: "Attack", min: 0, max: 30, step: 0.001, unit: "s" },
+    { key: "decay", label: "Decay", min: 0, max: 30, step: 0.001, unit: "s" },
     { key: "sustain", label: "Sustain", min: 0, max: 1, step: 0.01, unit: "%" },
-    { key: "release", label: "Release", min: 0, max: 10, step: 0.001, unit: "s" },
+    { key: "release", label: "Release", min: 0, max: 30, step: 0.001, unit: "s" },
   ];
 
   const envelopeLabel = (definition, value) =>
@@ -1259,10 +1292,24 @@
     sample_name: "",
     velocity_low: velocityLow,
     velocity_high: velocityHigh,
-    gain_db: 0,
+    volume_percent: 100,
     pan: 0,
     tune_semitones: 0,
   });
+
+  // Drafts created before volume was presented as a percentage keep their
+  // exact audible level when opened in the newer card editor.
+  for (const [zoneIndex, zone] of builderState.zones.entries()) {
+    zone.color = normalizeZoneColor(zone.color, ZONE_COLORS[zoneIndex % ZONE_COLORS.length]);
+    if (!Array.isArray(zone.layers)) zone.layers = [];
+    for (const layer of zone.layers) {
+      if (!Number.isFinite(layer.volume_percent)) {
+        const gain = Number.isFinite(layer.gain_db) ? layer.gain_db : 0;
+        layer.volume_percent = Math.round(100 * (10 ** (gain / 20)));
+      }
+      delete layer.gain_db;
+    }
+  }
 
   const newZone = (note = 60) => ({
     id: builderId("zone"),
@@ -1270,9 +1317,284 @@
     key_low: note,
     key_high: note,
     root_key: note,
+    color: ZONE_COLORS[builderState.zones.length % ZONE_COLORS.length],
     envelope_override: null,
-    layers: [newLayer()],
+    layers: [],
   });
+
+  const formatWaveformDuration = (seconds) => {
+    if (!Number.isFinite(seconds)) return "--:--";
+    if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 2 : 1)} s`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
+  };
+
+  const analyzeWaveform = async (layerId, file) => {
+    builderWaveforms.set(layerId, { status: "loading" });
+    renderLayerList();
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      builderWaveforms.set(layerId, { status: "error", message: "Waveform preview is unavailable." });
+      renderLayerList();
+      return;
+    }
+    let context;
+    try {
+      context = new AudioContextClass();
+      const audioBuffer = await context.decodeAudioData(await file.arrayBuffer());
+      if (builderFiles.get(layerId) !== file) return;
+      const bucketCount = Math.min(720, Math.max(96, Math.ceil(audioBuffer.duration * 90)));
+      const channelPeaks = [];
+      let peakAmplitude = 0;
+      for (let channelIndex = 0; channelIndex < Math.min(audioBuffer.numberOfChannels, 2); channelIndex += 1) {
+        const samples = audioBuffer.getChannelData(channelIndex);
+        const peaks = new Float32Array(bucketCount * 2);
+        for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+          const start = Math.floor((bucket * samples.length) / bucketCount);
+          const end = Math.max(start + 1, Math.floor(((bucket + 1) * samples.length) / bucketCount));
+          let minimum = 1;
+          let maximum = -1;
+          for (let frame = start; frame < Math.min(end, samples.length); frame += 1) {
+            const sample = samples[frame];
+            minimum = Math.min(minimum, sample);
+            maximum = Math.max(maximum, sample);
+          }
+          if (minimum > maximum) minimum = maximum = 0;
+          peaks[bucket * 2] = minimum;
+          peaks[bucket * 2 + 1] = maximum;
+          peakAmplitude = Math.max(peakAmplitude, Math.abs(minimum), Math.abs(maximum));
+        }
+        channelPeaks.push(peaks);
+      }
+      builderWaveforms.set(layerId, {
+        status: "ready",
+        channels: audioBuffer.numberOfChannels,
+        channelPeaks,
+        duration: audioBuffer.duration,
+        sampleRate: audioBuffer.sampleRate,
+        clipped: peakAmplitude >= 0.999,
+      });
+    } catch (_) {
+      if (builderFiles.get(layerId) === file) {
+        builderWaveforms.set(layerId, {
+          status: "error",
+          message: "This WAV could not be decoded for preview.",
+        });
+      }
+    } finally {
+      await context?.close?.().catch(() => {});
+      if (builderFiles.get(layerId) === file) renderLayerList();
+    }
+  };
+
+  const drawLayerWaveform = (canvas, waveform) => {
+    if (!canvas?.isConnected || waveform?.status !== "ready" || !waveform.channelPeaks.length) return;
+    const width = Math.max(280, Math.round(canvas.clientWidth || 620));
+    const height = Math.max(58, Math.round(canvas.clientHeight || 72));
+    const ratio = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    const context = canvas.getContext("2d");
+    context.scale(ratio, ratio);
+    context.clearRect(0, 0, width, height);
+
+    context.strokeStyle = "rgba(176, 228, 204, .08)";
+    context.lineWidth = 1;
+    for (let line = 1; line < 4; line += 1) {
+      const x = Math.round((width * line) / 4) + .5;
+      context.beginPath();
+      context.moveTo(x, 0);
+      context.lineTo(x, height);
+      context.stroke();
+    }
+
+    const lanes = waveform.channelPeaks.length;
+    const laneHeight = height / lanes;
+    const gradient = context.createLinearGradient(0, 0, width, 0);
+    gradient.addColorStop(0, "rgba(117, 174, 149, .78)");
+    gradient.addColorStop(.42, "rgba(210, 255, 235, .98)");
+    gradient.addColorStop(1, "rgba(114, 219, 181, .82)");
+    context.strokeStyle = gradient;
+    context.lineWidth = Math.max(1, Math.min(1.6, width / 500));
+    for (const [channelIndex, peaks] of waveform.channelPeaks.entries()) {
+      const center = laneHeight * channelIndex + laneHeight / 2;
+      context.strokeStyle = "rgba(176, 228, 204, .12)";
+      context.beginPath();
+      context.moveTo(0, Math.round(center) + .5);
+      context.lineTo(width, Math.round(center) + .5);
+      context.stroke();
+      context.strokeStyle = gradient;
+      context.beginPath();
+      const amplitude = laneHeight * .42;
+      const bucketTotal = peaks.length / 2;
+      for (let bucket = 0; bucket < bucketTotal; bucket += 1) {
+        const x = (bucket / Math.max(1, bucketTotal - 1)) * width;
+        context.moveTo(x, center - peaks[bucket * 2 + 1] * amplitude);
+        context.lineTo(x, center - peaks[bucket * 2] * amplitude);
+      }
+      context.stroke();
+    }
+  };
+
+  const createLayerWaveform = (layer) => {
+    const shell = document.createElement("section");
+    shell.className = "layer-waveform-shell";
+    const waveform = builderWaveforms.get(layer.id);
+    const file = builderFiles.get(layer.id);
+    if (waveform?.status === "ready") {
+      const canvas = document.createElement("canvas");
+      canvas.className = "layer-waveform";
+      canvas.setAttribute("aria-label", `Waveform preview for ${layer.sample_name}`);
+      const metadata = document.createElement("div");
+      metadata.className = "layer-waveform-meta";
+      const format = document.createElement("span");
+      format.textContent = `${waveform.channels === 1 ? "MONO" : `${waveform.channels} CH`} · ${(waveform.sampleRate / 1000).toFixed(1)} kHz · ${formatWaveformDuration(waveform.duration)}`;
+      metadata.append(format);
+      if (waveform.clipped) {
+        const clipping = document.createElement("strong");
+        clipping.textContent = "PEAK";
+        clipping.title = "The sample reaches full scale.";
+        metadata.append(clipping);
+      }
+      shell.append(canvas, metadata);
+      requestAnimationFrame(() => drawLayerWaveform(canvas, waveform));
+    } else {
+      shell.classList.add("empty");
+      const pulse = document.createElement("span");
+      pulse.className = "layer-waveform-placeholder";
+      const message = document.createElement("span");
+      if (waveform?.status === "loading") {
+        shell.classList.add("loading");
+        message.textContent = "Analyzing waveform…";
+      } else if (waveform?.status === "error") {
+        shell.classList.add("error");
+        message.textContent = waveform.message;
+      } else if (layer.sample_name && !file) {
+        message.textContent = "Reload the sample to restore its preview and include it in the export.";
+      } else {
+        message.textContent = "Load a WAV or FLAC sample to preview its waveform.";
+      }
+      shell.append(pulse, message);
+    }
+    return shell;
+  };
+
+  const zoneAtNote = (note) => {
+    const candidates = builderState.zones.filter(
+      (zone) => note >= zone.key_low && note <= zone.key_high,
+    );
+    if (!candidates.length) return null;
+    return candidates.find((zone) => zone.id === selectedZoneId) || candidates.at(-1);
+  };
+
+  const openZoneForNote = (note) => {
+    const zone = zoneAtNote(note);
+    openZoneEditor(zone || newZone(note));
+  };
+
+  const coupledZoneAtEdge = (zone, edge) => {
+    const candidates = builderState.zones.filter((candidate) => candidate.id !== zone.id && (
+      edge === "high"
+        ? candidate.key_low === zone.key_high + 1
+        : candidate.key_high === zone.key_low - 1
+    ));
+    return candidates.find((candidate) => candidate.id === selectedZoneId) || candidates.at(-1) || null;
+  };
+
+  const updateZoneBlockGeometry = (zone) => {
+    const block = builderLane?.querySelector(`[data-zone-id="${zone.id}"]`);
+    if (!block) return;
+    block.style.top = `calc(var(--builder-row) * ${127 - zone.key_high} + 2px)`;
+    block.style.height = `calc(var(--builder-row) * ${zone.key_high - zone.key_low + 1} - 4px)`;
+    const detail = block.querySelector(".zone-pill-detail");
+    if (detail) {
+      detail.textContent = `${noteName(zone.key_low)}–${noteName(zone.key_high)} · ${zone.layers.length} layer${zone.layers.length === 1 ? "" : "s"}${zone.envelope_override ? " · ADSR override" : ""}`;
+    }
+  };
+
+  const resizeZoneBoundary = (zoneId, edge, requestedNote, coupledZoneId = null) => {
+    const zone = builderState.zones.find((candidate) => candidate.id === zoneId);
+    if (!zone) return false;
+    const coupled = coupledZoneId
+      ? builderState.zones.find((candidate) => candidate.id === coupledZoneId)
+      : coupledZoneAtEdge(zone, edge);
+    const previous = edge === "high" ? zone.key_high : zone.key_low;
+    if (edge === "high") {
+      const maximum = coupled ? coupled.key_high - 1 : 127;
+      zone.key_high = Math.round(clampNumber(requestedNote, zone.key_low, maximum, previous));
+      zone.root_key = Math.min(zone.root_key, zone.key_high);
+      if (coupled) {
+        coupled.key_low = zone.key_high + 1;
+        coupled.root_key = Math.max(coupled.root_key, coupled.key_low);
+      }
+    } else {
+      const minimum = coupled ? coupled.key_low + 1 : 0;
+      zone.key_low = Math.round(clampNumber(requestedNote, minimum, zone.key_high, previous));
+      zone.root_key = Math.max(zone.root_key, zone.key_low);
+      if (coupled) {
+        coupled.key_high = zone.key_low - 1;
+        coupled.root_key = Math.min(coupled.root_key, coupled.key_high);
+      }
+    }
+    updateZoneBlockGeometry(zone);
+    if (coupled) updateZoneBlockGeometry(coupled);
+    return previous !== (edge === "high" ? zone.key_high : zone.key_low);
+  };
+
+  const beginZoneResize = (event, zone, edge) => {
+    beginBuilderAudition();
+    event.preventDefault();
+    event.stopPropagation();
+    selectedZoneId = zone.id;
+    const coupled = coupledZoneAtEdge(zone, edge);
+    let moved = false;
+    const move = (pointerEvent) => {
+      const rect = builderLane.getBoundingClientRect();
+      const note = 127 - Math.floor((pointerEvent.clientY - rect.top) / builderRowHeight);
+      moved = resizeZoneBoundary(zone.id, edge, note, coupled?.id) || moved;
+    };
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (moved) {
+        suppressZoneClickUntil = performance.now() + 260;
+        persistBuilder();
+        renderBuilderZones();
+        setBuilderMessage(coupled
+          ? `Shared boundary updated: ${zone.name} and ${coupled.name}.`
+          : `${zone.name} resized.`, "success");
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
+  };
+
+  const createZoneResizeHandle = (zone, edge) => {
+    const handle = document.createElement("span");
+    handle.className = `zone-resize-handle ${edge}`;
+    handle.role = "separator";
+    handle.tabIndex = 0;
+    handle.setAttribute("aria-orientation", "horizontal");
+    handle.setAttribute("aria-label", `Resize ${edge === "high" ? "upper" : "lower"} edge of ${zone.name}`);
+    handle.addEventListener("pointerdown", (event) => beginZoneResize(event, zone, edge));
+    handle.addEventListener("click", (event) => event.stopPropagation());
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      event.stopPropagation();
+      beginBuilderAudition();
+      const delta = event.key === "ArrowUp" ? 1 : -1;
+      const current = edge === "high" ? zone.key_high : zone.key_low;
+      if (resizeZoneBoundary(zone.id, edge, current + delta)) {
+        persistBuilder();
+        renderBuilderZones();
+        builderLane?.querySelector(`[data-zone-id="${zone.id}"] .zone-resize-handle.${edge}`)?.focus();
+      }
+    });
+    return handle;
+  };
 
   const renderBuilderKeys = () => {
     if (!builderKeys) return;
@@ -1282,9 +1604,11 @@
       const key = document.createElement("div");
       key.className = `builder-key${black.has(note % 12) ? " black" : ""}${note === 60 ? " middle-c" : ""}`;
       key.style.top = `calc(var(--builder-row) * ${127 - note})`;
-      key.textContent = `${noteName(note)}  ${note}`;
       key.dataset.note = String(note);
-      key.addEventListener("dblclick", () => openZoneEditor(newZone(note)));
+      const label = document.createElement("span");
+      label.textContent = `${noteName(note)}  ${note}`;
+      key.append(label);
+      key.addEventListener("click", () => openZoneForNote(note));
       fragment.append(key);
     }
     builderKeys.replaceChildren(fragment);
@@ -1293,25 +1617,48 @@
   const renderBuilderZones = () => {
     if (!builderLane) return;
     const fragment = document.createDocumentFragment();
+    for (let note = 127; note >= 0; note -= 1) {
+      const row = document.createElement("div");
+      row.className = "builder-lane-row";
+      row.style.top = `calc(var(--builder-row) * ${127 - note})`;
+      row.dataset.note = String(note);
+      row.title = `Create zone at ${noteName(note)}`;
+      row.addEventListener("pointerenter", () => {
+        builderKeys?.querySelector(`[data-note="${note}"]`)?.classList.add("hovered");
+      });
+      row.addEventListener("pointerleave", () => {
+        builderKeys?.querySelector(`[data-note="${note}"]`)?.classList.remove("hovered");
+      });
+      row.addEventListener("click", () => openZoneForNote(note));
+      fragment.append(row);
+    }
     for (const [index, zone] of builderState.zones.entries()) {
-      const pill = document.createElement("button");
-      pill.type = "button";
+      const pill = document.createElement("div");
+      pill.role = "button";
+      pill.tabIndex = 0;
       pill.className = `zone-pill${zone.id === selectedZoneId ? " selected" : ""}`;
       pill.style.top = `calc(var(--builder-row) * ${127 - zone.key_high} + 2px)`;
       pill.style.height = `calc(var(--builder-row) * ${zone.key_high - zone.key_low + 1} - 4px)`;
-      pill.style.left = `${12 + (index % 4) * 7}px`;
-      pill.style.right = `${12 + ((index + 1) % 4) * 7}px`;
+      pill.style.setProperty("--zone-rgb", zoneColorRgb(zone.color));
       pill.dataset.zoneId = zone.id;
       const title = document.createElement("strong");
       title.textContent = zone.name || `Zone ${index + 1}`;
       const detail = document.createElement("span");
+      detail.className = "zone-pill-detail";
       detail.textContent = `${noteName(zone.key_low)}–${noteName(zone.key_high)} · ${zone.layers.length} layer${zone.layers.length === 1 ? "" : "s"}${zone.envelope_override ? " · ADSR override" : ""}`;
-      pill.append(title, detail);
-      pill.addEventListener("click", () => {
+      pill.append(createZoneResizeHandle(zone, "high"), title, detail, createZoneResizeHandle(zone, "low"));
+      pill.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (performance.now() < suppressZoneClickUntil) return;
         selectedZoneId = zone.id;
-        renderBuilderZones();
+        openZoneEditor(zone);
       });
-      pill.addEventListener("dblclick", () => openZoneEditor(zone));
+      pill.addEventListener("keydown", (event) => {
+        if (event.target !== pill || (event.key !== "Enter" && event.key !== " ")) return;
+        event.preventDefault();
+        selectedZoneId = zone.id;
+        openZoneEditor(zone);
+      });
       fragment.append(pill);
     }
     builderLane.replaceChildren(fragment);
@@ -1341,9 +1688,23 @@
   const renderLayerList = () => {
     if (!layerList || !editingZone) return;
     const fragment = document.createDocumentFragment();
-    for (const layer of editingZone.layers) {
+    if (!editingZone.layers.length) {
+      const empty = document.createElement("div");
+      empty.className = "layer-empty";
+      const title = document.createElement("strong");
+      title.textContent = "0 layers";
+      const detail = document.createElement("span");
+      detail.textContent = "Add a layer to load a WAV or FLAC sample and define its velocity response.";
+      empty.append(title, detail);
+      fragment.append(empty);
+    }
+    for (const [layerIndex, layer] of editingZone.layers.entries()) {
       const row = document.createElement("div");
       row.className = "layer-row";
+      const layerTitle = document.createElement("div");
+      layerTitle.className = "layer-card-title";
+      layerTitle.textContent = `Layer ${String(layerIndex + 1).padStart(2, "0")}`;
+      row.append(layerTitle);
       const sampleField = document.createElement("label");
       sampleField.className = "layer-field sample-field";
       const sampleCaption = document.createElement("span");
@@ -1351,7 +1712,7 @@
       const sampleButton = document.createElement("button");
       sampleButton.type = "button";
       sampleButton.className = "sample-pick";
-      sampleButton.textContent = layer.sample_name || "Choose WAV / FLAC";
+      sampleButton.textContent = layer.sample_name || "Load sample";
       sampleButton.title = layer.sample_name || "Choose sample";
       sampleButton.addEventListener("click", () => {
         sampleTargetLayerId = layer.id;
@@ -1362,7 +1723,7 @@
       const numericFields = [
         ["velocity_low", "Velocity low", 1, 127, 1],
         ["velocity_high", "Velocity high", 1, 127, 1],
-        ["gain_db", "Gain dB", -60, 24, 0.1],
+        ["volume_percent", "Volume %", 0, MAX_VOLUME_PERCENT, 0.01],
         ["pan", "Pan", -1, 1, 0.01],
         ["tune_semitones", "Tune", -48, 48, 0.01],
       ];
@@ -1377,7 +1738,10 @@
         input.max = max;
         input.step = step;
         input.value = layer[key];
-        input.addEventListener("input", () => { layer[key] = Number(input.value); });
+      input.addEventListener("input", () => {
+        layer[key] = Number(input.value);
+        scheduleBuilderPreview();
+      });
         field.append(caption, input);
         row.append(field);
       }
@@ -1386,13 +1750,15 @@
       remove.className = "layer-remove";
       remove.textContent = "×";
       remove.title = "Remove layer";
-      remove.disabled = editingZone.layers.length === 1;
       remove.addEventListener("click", () => {
         editingZone.layers = editingZone.layers.filter((candidate) => candidate.id !== layer.id);
         builderFiles.delete(layer.id);
+        builderWaveforms.delete(layer.id);
         renderLayerList();
+        scheduleBuilderPreview();
       });
       row.append(remove);
+      row.append(createLayerWaveform(layer));
       fragment.append(row);
     }
     layerList.replaceChildren(fragment);
@@ -1402,18 +1768,31 @@
 
   const openZoneEditor = (zone) => {
     if (!zoneDialog) return;
+    beginBuilderAudition();
     editingZone = structuredClone(zone);
     selectedZoneId = zone.id;
+    for (const key of builderKeys?.querySelectorAll(".hovered") ?? []) {
+      key.classList.remove("hovered");
+    }
+    renderBuilderZones();
     zoneField("[data-zone-name]").value = editingZone.name;
     zoneField("[data-zone-low]").value = editingZone.key_low;
     zoneField("[data-zone-high]").value = editingZone.key_high;
     zoneField("[data-zone-root]").value = editingZone.root_key;
+    const color = zoneField("[data-zone-color]");
+    color.value = normalizeZoneColor(editingZone.color);
+    zoneField("[data-zone-color-output]").value = color.value.toUpperCase();
+    zoneDialog.style.setProperty("--editing-zone-rgb", zoneColorRgb(color.value));
     const override = zoneField("[data-zone-envelope-override]");
     override.checked = Boolean(editingZone.envelope_override);
     if (!editingZone.envelope_override) editingZone.envelope_override = structuredClone(builderState.envelope);
     zoneEnvelopeHost?.setAttribute("aria-disabled", String(!override.checked));
-    renderEnvelope(zoneEnvelopeHost, editingZone.envelope_override);
+    renderEnvelope(zoneEnvelopeHost, editingZone.envelope_override, scheduleBuilderPreview);
     renderLayerList();
+    for (const layer of editingZone.layers) {
+      const file = builderFiles.get(layer.id);
+      if (file && !builderWaveforms.has(layer.id)) analyzeWaveform(layer.id, file);
+    }
     zoneDialog.showModal();
     zoneField("[data-zone-name]").focus();
   };
@@ -1421,14 +1800,41 @@
   const closeZoneEditor = () => {
     editingZone = null;
     if (zoneDialog?.open) zoneDialog.close();
+    scheduleBuilderPreview();
   };
 
   zoneField("[data-zone-envelope-override]")?.addEventListener("change", (event) => {
     zoneEnvelopeHost?.setAttribute("aria-disabled", String(!event.target.checked));
+    scheduleBuilderPreview();
   });
+  zoneField("[data-zone-color]")?.addEventListener("input", (event) => {
+    if (!editingZone) return;
+    editingZone.color = normalizeZoneColor(event.target.value);
+    zoneField("[data-zone-color-output]").value = editingZone.color.toUpperCase();
+    zoneDialog.style.setProperty("--editing-zone-rgb", zoneColorRgb(editingZone.color));
+    scheduleBuilderPreview();
+  });
+  const zoneColorPresets = zoneField("[data-zone-color-presets]");
+  for (const color of ZONE_COLORS) {
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "zone-color-swatch";
+    swatch.style.setProperty("--swatch", color);
+    swatch.title = color.toUpperCase();
+    swatch.setAttribute("aria-label", `Use zone color ${color.toUpperCase()}`);
+    swatch.addEventListener("click", () => {
+      const input = zoneField("[data-zone-color]");
+      input.value = color;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    zoneColorPresets?.append(swatch);
+  }
   zoneField("[data-zone-close]")?.addEventListener("click", closeZoneEditor);
   zoneField("[data-zone-cancel]")?.addEventListener("click", closeZoneEditor);
-  zoneDialog?.addEventListener("cancel", () => { editingZone = null; });
+  zoneDialog?.addEventListener("cancel", () => {
+    editingZone = null;
+    scheduleBuilderPreview();
+  });
   zoneField("[data-layer-add]")?.addEventListener("click", () => {
     if (!editingZone) return;
     const splittable = [...editingZone.layers]
@@ -1444,6 +1850,7 @@
       editingZone.layers.push(newLayer());
     }
     renderLayerList();
+    scheduleBuilderPreview();
   });
 
   builderSamples?.addEventListener("change", () => {
@@ -1452,7 +1859,7 @@
     if (!files.length) return;
     const accepted = files.filter((file) => /\.(wav|wave|flac)$/i.test(file.name));
     if (accepted.length !== files.length) {
-      setBuilderMessage("Only WAV, WAVE and FLAC samples are supported.", "error");
+      setBuilderMessage("Only WAV, WAVE and FLAC samples are supported in the instrument builder.", "error");
     }
     const targetIndex = editingZone.layers.findIndex((layer) => layer.id === sampleTargetLayerId);
     accepted.forEach((file, index) => {
@@ -1462,12 +1869,20 @@
         editingZone.layers.push(layer);
       }
       layer.sample_name = file.name;
+      layer.sample_path = "";
       builderFiles.set(layer.id, file);
+      builderWaveforms.delete(layer.id);
+      analyzeWaveform(layer.id, file);
     });
     builderSamples.value = "";
     sampleTargetLayerId = null;
     renderLayerList();
+    scheduleBuilderPreview();
   });
+
+  for (const selector of ["[data-zone-name]", "[data-zone-low]", "[data-zone-high]", "[data-zone-root]"]) {
+    zoneField(selector)?.addEventListener("input", scheduleBuilderPreview);
+  }
 
   const readZoneFields = () => {
     if (!editingZone) return null;
@@ -1475,27 +1890,28 @@
     editingZone.key_low = Number(zoneField("[data-zone-low]").value);
     editingZone.key_high = Number(zoneField("[data-zone-high]").value);
     editingZone.root_key = Number(zoneField("[data-zone-root]").value);
+    editingZone.color = normalizeZoneColor(zoneField("[data-zone-color]").value);
     if (!zoneField("[data-zone-envelope-override]").checked) editingZone.envelope_override = null;
     return editingZone;
   };
 
-  const validateZone = (zone) => {
+  const validateZone = (zone, requireLayers = false) => {
     if (!Number.isInteger(zone.key_low) || !Number.isInteger(zone.key_high)
         || !Number.isInteger(zone.root_key) || zone.key_low < 0 || zone.key_high > 127
         || zone.key_low > zone.key_high || zone.root_key < zone.key_low || zone.root_key > zone.key_high) {
       return "The zone key range is invalid, or the root key is outside it.";
     }
-    if (!zone.layers.length) return "The zone needs at least one velocity layer.";
+    if (requireLayers && !zone.layers.length) return "The zone needs at least one velocity layer.";
     for (const layer of zone.layers) {
       if (!Number.isInteger(layer.velocity_low) || !Number.isInteger(layer.velocity_high)
           || layer.velocity_low < 1 || layer.velocity_high > 127
           || layer.velocity_low > layer.velocity_high) {
         return `Velocity range is invalid in ${layer.sample_name || "an unassigned layer"}.`;
       }
-      if (!Number.isFinite(layer.gain_db) || layer.gain_db < -60 || layer.gain_db > 24
+      if (!Number.isFinite(layer.volume_percent) || layer.volume_percent < 0 || layer.volume_percent > MAX_VOLUME_PERCENT
           || !Number.isFinite(layer.pan) || layer.pan < -1 || layer.pan > 1
           || !Number.isFinite(layer.tune_semitones) || layer.tune_semitones < -48 || layer.tune_semitones > 48) {
-        return `Gain, pan or tuning is invalid in ${layer.sample_name || "an unassigned layer"}.`;
+        return `Volume, pan or tuning is invalid in ${layer.sample_name || "an unassigned layer"}.`;
       }
     }
     return null;
@@ -1503,7 +1919,7 @@
 
   zoneField("[data-zone-save]")?.addEventListener("click", () => {
     const zone = readZoneFields();
-    const error = zone && validateZone(zone);
+    const error = zone && validateZone(zone, false);
     if (error) {
       setBuilderMessage(error, "error");
       return;
@@ -1522,7 +1938,10 @@
     if (!editingZone) return;
     const known = builderState.zones.some((zone) => zone.id === editingZone.id);
     if (known) {
-      for (const layer of editingZone.layers) builderFiles.delete(layer.id);
+      for (const layer of editingZone.layers) {
+        builderFiles.delete(layer.id);
+        builderWaveforms.delete(layer.id);
+      }
       builderState.zones = builderState.zones.filter((zone) => zone.id !== editingZone.id);
       selectedZoneId = null;
       persistBuilder();
@@ -1532,8 +1951,68 @@
     closeZoneEditor();
   });
 
-  builderNewZone?.addEventListener("click", () => openZoneEditor(newZone(60)));
+  builderNewZone?.addEventListener("click", () => {
+    beginBuilderAudition();
+    openZoneEditor(newZone(60));
+  });
+  const consumeRfBankFile = async (file, handle = null) => {
+    builderOpen.disabled = true;
+    builderExport.disabled = true;
+    setBuilderMessage(`Opening ${file.name} and validating its contents…`);
+    try {
+      await openRfBankFile(file, handle);
+    } catch (error) {
+      setBuilderMessage(error instanceof Error ? error.message : "The RF Bank could not be opened.", "error");
+    } finally {
+      builderOpen.disabled = false;
+      builderExport.disabled = false;
+    }
+  };
+  if (builderOpen) builderOpen.title = "Open an RF Bank · Hold Shift to use the portable file selector";
+  builderOpen?.addEventListener("click", async (event) => {
+    if (event.shiftKey || typeof window.showOpenFilePicker !== "function") {
+      builderOpenFile?.click();
+      return;
+    }
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        multiple: false,
+        types: [{
+          description: "RF Instrument Bank",
+          accept: { "application/vnd.rackforge.bank+zip": [".rfbank"] },
+        }],
+      });
+      if (handle) await consumeRfBankFile(await handle.getFile(), handle);
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      builderOpenFile?.click();
+    }
+  });
+  builderOpenFile?.addEventListener("change", () => {
+    const file = builderOpenFile.files?.[0];
+    builderOpenFile.value = "";
+    if (file) consumeRfBankFile(file);
+  });
+  builderInstrument?.addEventListener("change", () => activateOpenedInstrument(Number(builderInstrument.value)));
+  let newBlankResetTimer = 0;
+  builderNewBank?.addEventListener("click", () => {
+    if (!builderNewBank.hasAttribute("data-confirming")) {
+      builderNewBank.setAttribute("data-confirming", "");
+      builderNewBank.textContent = "Confirm new blank";
+      window.clearTimeout(newBlankResetTimer);
+      newBlankResetTimer = window.setTimeout(() => {
+        builderNewBank.removeAttribute("data-confirming");
+        builderNewBank.textContent = "New blank";
+      }, 4_000);
+      return;
+    }
+    window.clearTimeout(newBlankResetTimer);
+    builderNewBank.removeAttribute("data-confirming");
+    builderNewBank.textContent = "New blank";
+    resetBuilderToBlank();
+  });
   builderName?.addEventListener("input", () => {
+    beginBuilderAudition();
     builderState.name = builderName.value;
     persistBuilder();
   });
@@ -1558,6 +2037,371 @@
     let value = 0xffffffff;
     for (const byte of bytes) value = crcTable[(value ^ byte) & 0xff] ^ (value >>> 8);
     return (value ^ 0xffffffff) >>> 0;
+  };
+
+  const zipError = (message) => new Error(`RF Bank: ${message}`);
+
+  const normalizeZipPath = (value) => {
+    const path = String(value || "").replaceAll("\\", "/");
+    if (!path || path.length > 1_024 || path.includes("\0") || path.startsWith("/")
+        || /^[a-z]:/i.test(path) || path.split("/").some((part) => part === "." || part === "..")) {
+      throw zipError(`unsafe entry path ${JSON.stringify(value)}`);
+    }
+    return path;
+  };
+
+  const findZipEnd = (bytes) => {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const earliest = Math.max(0, bytes.length - 65_557);
+    for (let offset = bytes.length - 22; offset >= earliest; offset -= 1) {
+      if (view.getUint32(offset, true) !== 0x06054b50) continue;
+      const commentLength = view.getUint16(offset + 20, true);
+      if (offset + 22 + commentLength === bytes.length) return offset;
+    }
+    throw zipError("the archive directory is missing or truncated");
+  };
+
+  const indexZip = async (file) => {
+    if (!file || file.size < 22) throw zipError("the selected file is empty or truncated");
+    if (file.size > MAX_BANK_BYTES) throw zipError("the selected file exceeds the 128 MB bank limit");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const view = new DataView(bytes.buffer);
+    const endOffset = findZipEnd(bytes);
+    const disk = view.getUint16(endOffset + 4, true);
+    const directoryDisk = view.getUint16(endOffset + 6, true);
+    const entriesOnDisk = view.getUint16(endOffset + 8, true);
+    const entryCount = view.getUint16(endOffset + 10, true);
+    const directorySize = view.getUint32(endOffset + 12, true);
+    const directoryOffset = view.getUint32(endOffset + 16, true);
+    if (disk !== 0 || directoryDisk !== 0 || entriesOnDisk !== entryCount) {
+      throw zipError("multi-volume archives are not supported");
+    }
+    if (entryCount === 0 || entryCount > MAX_BANK_ENTRIES) {
+      throw zipError("the archive has an invalid number of entries");
+    }
+    if (entryCount === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff) {
+      throw zipError("ZIP64 banks are not supported within the 128 MB RF Bank limit");
+    }
+    const directoryEnd = directoryOffset + directorySize;
+    if (directoryOffset > endOffset || directoryEnd > endOffset) {
+      throw zipError("the archive directory points outside the file");
+    }
+    const decoder = new TextDecoder("utf-8");
+    const entries = [];
+    const names = new Set();
+    let totalExpanded = 0;
+    let cursor = directoryOffset;
+    for (let index = 0; index < entryCount; index += 1) {
+      if (cursor + 46 > directoryEnd || view.getUint32(cursor, true) !== 0x02014b50) {
+        throw zipError(`central directory entry ${index + 1} is invalid`);
+      }
+      const flags = view.getUint16(cursor + 8, true);
+      const method = view.getUint16(cursor + 10, true);
+      const checksum = view.getUint32(cursor + 16, true);
+      const compressedSize = view.getUint32(cursor + 20, true);
+      const size = view.getUint32(cursor + 24, true);
+      const nameLength = view.getUint16(cursor + 28, true);
+      const extraLength = view.getUint16(cursor + 30, true);
+      const commentLength = view.getUint16(cursor + 32, true);
+      const entryDisk = view.getUint16(cursor + 34, true);
+      const localOffset = view.getUint32(cursor + 42, true);
+      const recordEnd = cursor + 46 + nameLength + extraLength + commentLength;
+      if (recordEnd > directoryEnd || localOffset + 30 > directoryOffset) {
+        throw zipError(`central directory entry ${index + 1} is truncated`);
+      }
+      const name = normalizeZipPath(decoder.decode(bytes.subarray(cursor + 46, cursor + 46 + nameLength)));
+      const foldedName = name.toLocaleLowerCase("en-US");
+      if (entryDisk !== 0) throw zipError(`${name} belongs to another archive volume`);
+      if (flags & 0x0001) throw zipError(`${name} is encrypted`);
+      if (method !== 0 && method !== 8) throw zipError(`${name} uses unsupported ZIP compression method ${method}`);
+      if (compressedSize > MAX_BANK_BYTES || size > MAX_BANK_BYTES) throw zipError(`${name} is too large`);
+      totalExpanded += size;
+      if (totalExpanded > MAX_BANK_BYTES) throw zipError("expanded bank content exceeds 128 MB");
+      if (!name.endsWith("/")) {
+        if (names.has(foldedName)) throw zipError(`duplicate entry path ${name}`);
+        names.add(foldedName);
+        entries.push({ name, foldedName, flags, method, checksum, compressedSize, size, localOffset });
+      }
+      cursor = recordEnd;
+    }
+    if (cursor !== directoryEnd) throw zipError("the archive directory size is inconsistent");
+    return { bytes, entries, entryByName: new Map(entries.map((entry) => [entry.foldedName, entry])) };
+  };
+
+  const extractZipEntry = async (archive, entry) => {
+    if (entry.data) return entry.data;
+    const view = new DataView(archive.bytes.buffer, archive.bytes.byteOffset, archive.bytes.byteLength);
+    if (view.getUint32(entry.localOffset, true) !== 0x04034b50) {
+      throw zipError(`${entry.name} has an invalid local header`);
+    }
+    const nameLength = view.getUint16(entry.localOffset + 26, true);
+    const extraLength = view.getUint16(entry.localOffset + 28, true);
+    const start = entry.localOffset + 30 + nameLength + extraLength;
+    const end = start + entry.compressedSize;
+    if (start > archive.bytes.length || end > archive.bytes.length) {
+      throw zipError(`${entry.name} data is truncated`);
+    }
+    const compressed = archive.bytes.subarray(start, end);
+    let data;
+    if (entry.method === 0) {
+      data = compressed.slice();
+    } else {
+      if (typeof DecompressionStream !== "function") {
+        throw zipError(`${entry.name} is compressed and this host cannot expand it`);
+      }
+      try {
+        const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        data = new Uint8Array(await new Response(stream).arrayBuffer());
+      } catch (_) {
+        throw zipError(`${entry.name} could not be decompressed`);
+      }
+    }
+    if (data.length !== entry.size) throw zipError(`${entry.name} expanded to the wrong size`);
+    if (crc32(data) !== entry.checksum) throw zipError(`${entry.name} failed its checksum`);
+    entry.data = data;
+    return data;
+  };
+
+  const readZipJson = async (archive, entry, label) => {
+    if (entry.size > MAX_MAP_BYTES) throw zipError(`${label} exceeds the 2 MB map limit`);
+    let value;
+    try {
+      value = JSON.parse(new TextDecoder().decode(await extractZipEntry(archive, entry)));
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("RF Bank:")) throw error;
+      throw zipError(`${label} is not valid JSON`);
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw zipError(`${label} must be a JSON object`);
+    return value;
+  };
+
+  const jsonExtras = (value, known) => Object.fromEntries(
+    Object.entries(value).filter(([key]) => !known.has(key)),
+  );
+
+  const importEnvelope = (value, label) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw zipError(`${label} is missing`);
+    const envelope = {
+      attack: Number(value.attack_seconds ?? 0),
+      decay: Number(value.decay_seconds ?? .15),
+      sustain: Number(value.sustain_level ?? 1),
+      release: Number(value.release_seconds ?? .35),
+      _rf_extra: jsonExtras(value, new Set(["attack_seconds", "decay_seconds", "sustain_level", "release_seconds"])),
+    };
+    if (!Number.isFinite(envelope.attack) || !Number.isFinite(envelope.decay)
+        || !Number.isFinite(envelope.sustain) || !Number.isFinite(envelope.release)
+        || envelope.attack < 0 || envelope.attack > 30 || envelope.decay < 0 || envelope.decay > 30
+        || envelope.sustain < 0 || envelope.sustain > 1 || envelope.release < 0 || envelope.release > 30) {
+      throw zipError(`${label} has values outside the supported range`);
+    }
+    return envelope;
+  };
+
+  const sampleMime = (name) => name.toLowerCase().endsWith(".flac") ? "audio/flac" : "audio/wav";
+
+  const importRfInstrument = async (archive, entry, instrumentIndex, sampleEntries) => {
+    const value = await readZipJson(archive, entry, entry.name);
+    if (Number(value.schema_version ?? 0) > 1) throw zipError(`${entry.name} uses a newer instrument schema`);
+    if (!Array.isArray(value.zones) || !value.zones.length) throw zipError(`${entry.name} has no key zones`);
+    const state = {
+      schema_version: 1,
+      name: String(value.name || entry.name.split("/").at(-1).replace(/\.rfinstrument$/i, "")).trim() || `RF Instrument ${instrumentIndex + 1}`,
+      envelope: importEnvelope(value.envelope, `${entry.name} envelope`),
+      zones: [],
+      _rf_extra: jsonExtras(value, new Set(["schema_version", "id", "name", "envelope", "zones"])),
+      _rf_id: String(value.id || "").trim(),
+    };
+    const files = new Map();
+    let instrumentSampleBytes = 0;
+    const countedSamples = new Set();
+    for (const [zoneIndex, sourceZone] of value.zones.entries()) {
+      const label = `${entry.name} zone ${zoneIndex + 1}`;
+      if (!sourceZone || typeof sourceZone !== "object" || Array.isArray(sourceZone)) throw zipError(`${label} is not an object`);
+      const keyLow = Number(sourceZone.key_low);
+      const keyHigh = Number(sourceZone.key_high);
+      const rootKey = Number(sourceZone.root_key);
+      if (!Number.isInteger(keyLow) || !Number.isInteger(keyHigh) || !Number.isInteger(rootKey)
+          || keyLow < 0 || keyHigh > 127 || keyLow > keyHigh || rootKey < keyLow || rootKey > keyHigh) {
+        throw zipError(`${label} has an invalid key range`);
+      }
+      if (!Array.isArray(sourceZone.layers) || !sourceZone.layers.length) throw zipError(`${label} has no velocity layers`);
+      const zone = {
+        id: builderId("zone"),
+        name: String(sourceZone.name || `Zone ${noteName(rootKey)}`).trim() || `Zone ${zoneIndex + 1}`,
+        color: normalizeZoneColor(sourceZone.color, ZONE_COLORS[zoneIndex % ZONE_COLORS.length]),
+        key_low: keyLow,
+        key_high: keyHigh,
+        root_key: rootKey,
+        envelope_override: sourceZone.envelope_override
+          ? importEnvelope(sourceZone.envelope_override, `${label} envelope`) : null,
+        layers: [],
+        _rf_extra: jsonExtras(sourceZone, new Set(["name", "color", "key_low", "key_high", "root_key", "envelope_override", "layers"])),
+      };
+      for (const [layerIndex, sourceLayer] of sourceZone.layers.entries()) {
+        if (!sourceLayer || typeof sourceLayer !== "object" || Array.isArray(sourceLayer)) {
+          throw zipError(`${label} layer ${layerIndex + 1} is not an object`);
+        }
+        const sampleReference = typeof sourceLayer.sample === "string" ? sourceLayer.sample.trim() : "";
+        const sampleBase = sampleReference.replaceAll("\\", "/").split("/").at(-1).toLocaleLowerCase("en-US");
+        const sampleEntry = sampleEntries.get(sampleBase);
+        const velocityLow = Number(sourceLayer.velocity_low ?? 1);
+        const velocityHigh = Number(sourceLayer.velocity_high ?? 127);
+        const gainDb = Number(sourceLayer.gain_db ?? 0);
+        const pan = Number(sourceLayer.pan ?? 0);
+        const tune = Number(sourceLayer.tune_semitones ?? 0);
+        if (!sampleReference || !sampleEntry) throw zipError(`${label} layer ${layerIndex + 1} references missing sample ${sampleReference || "(empty)"}`);
+        if (!Number.isInteger(velocityLow) || !Number.isInteger(velocityHigh) || velocityLow < 1
+            || velocityHigh > 127 || velocityLow > velocityHigh || !Number.isFinite(gainDb)
+            || gainDb < -60 || gainDb > 24 || !Number.isFinite(pan) || pan < -1 || pan > 1
+            || !Number.isFinite(tune) || tune < -48 || tune > 48) {
+          throw zipError(`${label} layer ${layerIndex + 1} has invalid playback values`);
+        }
+        if (!countedSamples.has(sampleEntry.foldedName)) {
+          countedSamples.add(sampleEntry.foldedName);
+          instrumentSampleBytes += sampleEntry.size;
+        }
+        if (instrumentSampleBytes > SAMPLE_LIMIT_BYTES) throw zipError(`${entry.name} exceeds the 160 MB selected-instrument sample limit`);
+        const layer = {
+          id: builderId("layer"),
+          sample_name: sampleEntry.name.split("/").at(-1),
+          sample_path: sampleEntry.name,
+          velocity_low: velocityLow,
+          velocity_high: velocityHigh,
+          volume_percent: Number((100 * (10 ** (gainDb / 20))).toFixed(4)),
+          pan,
+          tune_semitones: tune,
+          _rf_extra: jsonExtras(sourceLayer, new Set(["sample", "velocity_low", "velocity_high", "gain_db", "pan", "tune_semitones"])),
+        };
+        let file = archive.sampleFiles.get(sampleEntry.foldedName);
+        if (!file) {
+          file = new File([await extractZipEntry(archive, sampleEntry)], layer.sample_name, {
+            type: sampleMime(layer.sample_name),
+            lastModified: 0,
+          });
+          archive.sampleFiles.set(sampleEntry.foldedName, file);
+        }
+        files.set(layer.id, file);
+        zone.layers.push(layer);
+      }
+      state.zones.push(zone);
+    }
+    return { path: entry.name, foldedPath: entry.foldedName, state, files };
+  };
+
+  const syncOpenedInstrument = () => {
+    if (!openedBank || openedBank.currentIndex < 0) return;
+    const instrument = openedBank.instruments[openedBank.currentIndex];
+    instrument.state = structuredClone(builderState);
+    instrument.files = new Map(builderFiles);
+  };
+
+  const renderOpenedBankContext = () => {
+    const active = Boolean(openedBank);
+    if (builderBankContext) builderBankContext.hidden = !active;
+    if (builderSave) builderSave.hidden = !openedBank?.handle?.createWritable;
+    if (builderExport) builderExport.textContent = active ? "Save As" : "Export RF Bank";
+    if (!active) return;
+    builderBankName.textContent = openedBank.fileName;
+    const legacy = openedBank.legacyCount;
+    builderBankDetail.textContent = `${openedBank.instruments.length} editable RF instrument${openedBank.instruments.length === 1 ? "" : "s"}${legacy ? ` · ${legacy} inherited map${legacy === 1 ? "" : "s"} preserved read-only` : ""}`;
+    const fragment = document.createDocumentFragment();
+    for (const [index, instrument] of openedBank.instruments.entries()) {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = instrument.state.name;
+      fragment.append(option);
+    }
+    builderInstrument.replaceChildren(fragment);
+    builderInstrument.value = String(openedBank.currentIndex);
+  };
+
+  const activateOpenedInstrument = (index) => {
+    if (!openedBank || !openedBank.instruments[index]) return;
+    syncOpenedInstrument();
+    openedBank.currentIndex = index;
+    const instrument = openedBank.instruments[index];
+    beginBuilderAudition();
+    builderState = structuredClone(instrument.state);
+    builderFiles.clear();
+    for (const [layerId, file] of instrument.files) builderFiles.set(layerId, file);
+    builderWaveforms.clear();
+    selectedZoneId = null;
+    editingZone = null;
+    builderName.value = builderState.name;
+    renderEnvelope(globalEnvelopeHost, builderState.envelope, () => {
+      beginBuilderAudition();
+      persistBuilder();
+    });
+    renderBuilderZones();
+    renderOpenedBankContext();
+    persistBuilder();
+    setBuilderMessage(`Editing ${builderState.name} from ${openedBank.fileName}.`, "success");
+  };
+
+  const resetBuilderToBlank = () => {
+    beginBuilderAudition();
+    openedBank = null;
+    builderState = defaultBuilderState();
+    builderFiles.clear();
+    builderWaveforms.clear();
+    selectedZoneId = null;
+    editingZone = null;
+    builderName.value = builderState.name;
+    renderEnvelope(globalEnvelopeHost, builderState.envelope, () => {
+      beginBuilderAudition();
+      persistBuilder();
+    });
+    renderBuilderZones();
+    renderOpenedBankContext();
+    persistBuilder();
+    setBuilderMessage("Blank RF instrument ready.", "success");
+  };
+
+  const openRfBankFile = async (file, handle = null) => {
+    if (!file?.name?.toLowerCase().endsWith(".rfbank")) throw zipError("choose a file ending in .rfbank");
+    const archive = await indexZip(file);
+    archive.sampleFiles = new Map();
+    const extensionOf = (name) => name.split("/").at(-1).split(".").at(-1).toLowerCase();
+    const basenameOf = (name) => name.split("/").at(-1);
+    const sampleEntries = new Map();
+    const instrumentEntries = [];
+    let manifestEntry = null;
+    let legacyCount = 0;
+    for (const entry of archive.entries) {
+      const extension = extensionOf(entry.name);
+      if (!manifestEntry && basenameOf(entry.name).toLowerCase() === "bank.json") manifestEntry = entry;
+      if (extension === "rfinstrument") instrumentEntries.push(entry);
+      if (extension === "nki") legacyCount += 1;
+      if (extension === "wav" || extension === "wave" || extension === "flac") {
+        const basename = basenameOf(entry.name).toLocaleLowerCase("en-US");
+        const existing = sampleEntries.get(basename);
+        const depth = entry.name.split("/").length;
+        if (!existing || depth < existing.depth) sampleEntries.set(basename, { ...entry, depth });
+      }
+    }
+    if (!instrumentEntries.length) {
+      throw zipError(legacyCount
+        ? `this bank contains ${legacyCount} inherited instrument map${legacyCount === 1 ? "" : "s"}, but no editable .rfinstrument maps`
+        : "this bank contains no editable .rfinstrument maps");
+    }
+    const manifest = manifestEntry ? await readZipJson(archive, manifestEntry, "bank.json") : {};
+    if (Number(manifest.schema_version ?? 0) > 1) throw zipError("bank.json uses a newer schema");
+    instrumentEntries.sort((left, right) => left.name.localeCompare(right.name));
+    const instruments = [];
+    for (const [index, entry] of instrumentEntries.entries()) {
+      instruments.push(await importRfInstrument(archive, entry, index, sampleEntries));
+    }
+    openedBank = {
+      ...archive,
+      fileName: file.name,
+      handle,
+      manifest,
+      manifestPath: manifestEntry?.name || "bank.json",
+      instruments,
+      legacyCount,
+      currentIndex: -1,
+    };
+    activateOpenedInstrument(0);
   };
 
   const zipRecord = (length, writer) => {
@@ -1613,19 +2457,23 @@
     return new Blob([...localParts, ...centralParts, end], { type: "application/vnd.rackforge.bank+zip" });
   };
 
-  const validateBuilder = () => {
-    const name = builderState.name.trim();
-    if (!name) return { error: "Give the instrument a name before exporting." };
-    if (!builderState.zones.length) return { error: "Add at least one key zone before exporting." };
+  const validateBuilderState = (state, filesMap) => {
+    const name = state.name.trim();
+    if (!name) return { error: "Give the instrument a name." };
+    if (!state.zones.length) return { error: "Add at least one key zone." };
     const files = [];
     let totalBytes = 0;
-    for (const zone of builderState.zones) {
-      const zoneError = validateZone(zone);
+    const countedFiles = new Set();
+    for (const zone of state.zones) {
+      const zoneError = validateZone(zone, true);
       if (zoneError) return { error: `${zone.name}: ${zoneError}` };
       for (const layer of zone.layers) {
-        const file = builderFiles.get(layer.id);
+        const file = filesMap.get(layer.id);
         if (!file) return { error: `${zone.name}: choose the sample for ${layer.sample_name || "every velocity layer"}.` };
-        totalBytes += file.size;
+        if (!countedFiles.has(file)) {
+          countedFiles.add(file);
+          totalBytes += file.size;
+        }
         files.push([layer, file]);
       }
     }
@@ -1635,105 +2483,327 @@
     return { name, files };
   };
 
-  builderExport?.addEventListener("click", async () => {
-    const validation = validateBuilder();
-    if (validation.error) {
-      setBuilderMessage(validation.error, "error");
-      return;
-    }
-    builderExport.disabled = true;
-    setBuilderMessage("Packing instrument and samples…");
-    try {
-      const instrumentSlug = slugFile(validation.name);
-      const usedNames = new Set();
-      const sampleEntries = [];
-      const sampleNames = new Map();
-      for (const [layer, file] of validation.files) {
-        const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^a-z0-9._-]+/gi, "-") || "sample";
+  const envelopeForExport = (envelope) => ({
+    ...(envelope._rf_extra || {}),
+    attack_seconds: envelope.attack,
+    decay_seconds: envelope.decay,
+    sustain_level: envelope.sustain,
+    release_seconds: envelope.release,
+  });
+
+  const setBuilderAudition = (state, title, detail) => {
+    if (!builderAudition) return;
+    builderAudition.dataset.state = state;
+    builderAudition.dataset.editMode = String(builderEditMode);
+    builderAudition.querySelector("strong").textContent = title;
+    builderAudition.querySelector("small").textContent = detail;
+  };
+
+  const auditionBuilderState = () => {
+    const state = structuredClone(builderState);
+    if (!editingZone) return state;
+    const zone = structuredClone(editingZone);
+    zone.name = zoneField("[data-zone-name]")?.value.trim() || "Untitled zone";
+    zone.key_low = Number(zoneField("[data-zone-low]")?.value);
+    zone.key_high = Number(zoneField("[data-zone-high]")?.value);
+    zone.root_key = Number(zoneField("[data-zone-root]")?.value);
+    zone.color = normalizeZoneColor(zoneField("[data-zone-color]")?.value);
+    if (!zoneField("[data-zone-envelope-override]")?.checked) zone.envelope_override = null;
+    const index = state.zones.findIndex((candidate) => candidate.id === zone.id);
+    if (index >= 0) state.zones[index] = zone;
+    else state.zones.push(zone);
+    return state;
+  };
+
+  const prepareBuilderPreview = async () => {
+    const state = auditionBuilderState();
+    const validation = validateBuilderState(state, builderFiles);
+    if (validation.error) throw Object.assign(new Error(validation.error), { waitingForDraft: true });
+    const encoder = new TextEncoder();
+    const samplePaths = new Map();
+    const filePaths = new Map();
+    const entries = [];
+    for (const [layer, file] of validation.files) {
+      let path = filePaths.get(file);
+      if (!path) {
         const extension = file.name.match(/\.[^.]+$/)?.[0].toLowerCase() || ".wav";
-        let name = `${stem}${extension}`;
-        let suffix = 2;
-        while (usedNames.has(name.toLowerCase())) name = `${stem}-${suffix++}${extension}`;
-        usedNames.add(name.toLowerCase());
-        sampleNames.set(layer.id, name);
-        sampleEntries.push({ name: `samples/${name}`, data: new Uint8Array(await file.arrayBuffer()) });
+        const stem = slugFile(file.name.replace(/\.[^.]+$/, ""));
+        path = `samples/${String(filePaths.size + 1).padStart(3, "0")}-${stem}${extension}`;
+        filePaths.set(file, path);
+        entries.push({ name: path, data: new Uint8Array(await file.arrayBuffer()) });
+      }
+      samplePaths.set(layer.id, path);
+    }
+    const instrumentId = "builder-audition";
+    const instrument = {
+      ...(state._rf_extra || {}),
+      schema_version: 1,
+      id: instrumentId,
+      name: validation.name,
+      envelope: envelopeForExport(state.envelope),
+      zones: state.zones.map((zone) => ({
+        ...(zone._rf_extra || {}),
+        name: zone.name,
+        color: normalizeZoneColor(zone.color),
+        key_low: zone.key_low,
+        key_high: zone.key_high,
+        root_key: zone.root_key,
+        envelope_override: zone.envelope_override ? envelopeForExport(zone.envelope_override) : null,
+        layers: zone.layers.map((layer) => ({
+          ...(layer._rf_extra || {}),
+          sample: samplePaths.get(layer.id),
+          velocity_low: layer.velocity_low,
+          velocity_high: layer.velocity_high,
+          gain_db: layer.volume_percent <= 0 ? -60 : 20 * Math.log10(layer.volume_percent / 100),
+          pan: layer.pan,
+          tune_semitones: layer.tune_semitones,
+        })),
+      })),
+    };
+    entries.unshift(
+      {
+        name: "bank.json",
+        data: encoder.encode(JSON.stringify({
+          schema_version: 1,
+          id: instrumentId,
+          name: `${validation.name} · Builder audition`,
+          instrument_count: 1,
+          created_by: "RF-Soundfonts Instrument Builder",
+        })),
+      },
+      {
+        name: `instruments/${instrumentId}.rfinstrument`,
+        data: encoder.encode(JSON.stringify(instrument)),
+      },
+    );
+    const totalBytes = entries.reduce((total, entry) => total + entry.data.length, 0);
+    if (entries.length > MAX_BANK_ENTRIES || totalBytes > MAX_BANK_BYTES) {
+      throw new Error("The audition bank exceeds the 128 MB runtime limit.");
+    }
+    return { blob: makeZip(entries), name: validation.name };
+  };
+
+  const syncBuilderPreview = async () => {
+    if (builderEditMode !== EDIT_MODE_ON || builderPreviewBusy) return;
+    builderPreviewBusy = true;
+    const revision = builderPreviewRevision;
+    setBuilderAudition("syncing", "Syncing audition", "Preparing the current zones and samples…");
+    try {
+      const prepared = await prepareBuilderPreview();
+      if (revision !== builderPreviewRevision) return;
+      const bytes = await prepared.blob.arrayBuffer();
+      await hostRequest("plugin.preview_resource", {
+        edit_mode: builderEditMode,
+        target_resource_id: "user-soundfont",
+        file_name: "rf-builder-audition.rfbank",
+        bytes,
+      }, [bytes]);
+      if (revision === builderPreviewRevision) {
+        setBuilderAudition("live", "Audition live", `${prepared.name} now receives RackForge MIDI and feeds its audio output.`);
+      }
+    } catch (error) {
+      if (revision !== builderPreviewRevision) return;
+      if (error?.waitingForDraft) {
+        setBuilderAudition("waiting", "Audition waiting", error.message);
+      } else {
+        setBuilderAudition("error", "Audition unavailable", error instanceof Error ? error.message : "RackForge could not load the draft.");
+      }
+    } finally {
+      builderPreviewBusy = false;
+      if (revision !== builderPreviewRevision) scheduleBuilderPreview(80);
+    }
+  };
+
+  function scheduleBuilderPreview(delay = 450) {
+    if (builderEditMode !== EDIT_MODE_ON) return;
+    builderPreviewRevision += 1;
+    window.clearTimeout(builderPreviewTimer);
+    builderPreviewTimer = window.setTimeout(syncBuilderPreview, delay);
+  }
+
+  function beginBuilderAudition() {
+    builderEditMode = EDIT_MODE_ON;
+    if (builderAudition) builderAudition.dataset.editMode = String(builderEditMode);
+    scheduleBuilderPreview(40);
+  }
+
+  const prepareBankEntries = async () => {
+    syncOpenedInstrument();
+    const descriptors = openedBank?.instruments || [{
+      path: `instruments/${slugFile(builderState.name)}.rfinstrument`,
+      foldedPath: `instruments/${slugFile(builderState.name)}.rfinstrument`.toLowerCase(),
+      state: structuredClone(builderState),
+      files: new Map(builderFiles),
+    }];
+    const encoder = new TextEncoder();
+    const replacements = new Map();
+    const addedEntries = new Map();
+    const usedPaths = new Set(openedBank?.entries.map((entry) => entry.foldedName) || []);
+    const assignedFilePaths = new Map();
+    const instrumentNames = [];
+    for (const descriptor of descriptors) {
+      const validation = validateBuilderState(descriptor.state, descriptor.files);
+      if (validation.error) throw new Error(`${descriptor.state.name}: ${validation.error}`);
+      const state = descriptor.state;
+      const instrumentSlug = slugFile(state._rf_id || validation.name);
+      instrumentNames.push(validation.name);
+      const samplePaths = new Map();
+      for (const [layer, file] of validation.files) {
+        let path = layer.sample_path ? normalizeZipPath(layer.sample_path) : "";
+        if (!path) path = assignedFilePaths.get(file) || "";
+        if (!path) {
+          const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^a-z0-9._-]+/gi, "-") || "sample";
+          const extension = file.name.match(/\.[^.]+$/)?.[0].toLowerCase() || ".wav";
+          let basename = `${stem}${extension}`;
+          let suffix = 2;
+          while (usedPaths.has(`samples/${basename}`.toLowerCase())) basename = `${stem}-${suffix++}${extension}`;
+          path = `samples/${basename}`;
+          usedPaths.add(path.toLowerCase());
+        }
+        layer.sample_path = path;
+        layer.sample_name = path.split("/").at(-1);
+        assignedFilePaths.set(file, path);
+        samplePaths.set(layer.id, path);
+        const foldedPath = path.toLocaleLowerCase("en-US");
+        if (!openedBank?.entryByName.has(foldedPath) && !addedEntries.has(foldedPath)) {
+          addedEntries.set(foldedPath, { name: path, data: new Uint8Array(await file.arrayBuffer()) });
+        }
       }
       const instrument = {
+        ...(state._rf_extra || {}),
         schema_version: 1,
         id: instrumentSlug,
         name: validation.name,
-        envelope: {
-          attack_seconds: builderState.envelope.attack,
-          decay_seconds: builderState.envelope.decay,
-          sustain_level: builderState.envelope.sustain,
-          release_seconds: builderState.envelope.release,
-        },
-        zones: builderState.zones.map((zone) => ({
+        envelope: envelopeForExport(state.envelope),
+        zones: state.zones.map((zone) => ({
+          ...(zone._rf_extra || {}),
           name: zone.name,
+          color: normalizeZoneColor(zone.color),
           key_low: zone.key_low,
           key_high: zone.key_high,
           root_key: zone.root_key,
-          envelope_override: zone.envelope_override ? {
-            attack_seconds: zone.envelope_override.attack,
-            decay_seconds: zone.envelope_override.decay,
-            sustain_level: zone.envelope_override.sustain,
-            release_seconds: zone.envelope_override.release,
-          } : null,
+          envelope_override: zone.envelope_override ? envelopeForExport(zone.envelope_override) : null,
           layers: zone.layers.map((layer) => ({
-            sample: sampleNames.get(layer.id),
+            ...(layer._rf_extra || {}),
+            sample: samplePaths.get(layer.id),
             velocity_low: layer.velocity_low,
             velocity_high: layer.velocity_high,
-            gain_db: layer.gain_db,
+            gain_db: layer.volume_percent <= 0 ? -60 : 20 * Math.log10(layer.volume_percent / 100),
             pan: layer.pan,
             tune_semitones: layer.tune_semitones,
           })),
         })),
       };
-      const encoder = new TextEncoder();
-      const entries = [
-        { name: "bank.json", data: encoder.encode(JSON.stringify({
-          schema_version: 1,
-          id: instrumentSlug,
-          name: validation.name,
-          instrument_count: 1,
-          created_by: "RF-Soundfonts Instrument Builder",
-        }, null, 2)) },
-        { name: `instruments/${instrumentSlug}.rfinstrument`, data: encoder.encode(JSON.stringify(instrument, null, 2)) },
-        ...sampleEntries,
-      ];
-      const blob = makeZip(entries);
-      if (typeof window.showSaveFilePicker === "function") {
-        const handle = await window.showSaveFilePicker({
-          suggestedName: `${instrumentSlug}.rfbank`,
-          types: [{
-            description: "RF Instrument Bank",
-            accept: { "application/vnd.rackforge.bank+zip": [".rfbank"] },
-          }],
-        });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-      } else {
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = `${instrumentSlug}.rfbank`;
-        anchor.click();
-        window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      replacements.set(descriptor.foldedPath, {
+        name: descriptor.path,
+        data: encoder.encode(JSON.stringify(instrument, null, 2)),
+      });
+    }
+    const primarySlug = slugFile(openedBank?.manifest?.id || instrumentNames[0]);
+    const manifest = openedBank ? {
+      ...openedBank.manifest,
+      schema_version: 1,
+      id: String(openedBank.manifest.id || primarySlug),
+      name: String(openedBank.manifest.name || openedBank.fileName.replace(/\.rfbank$/i, "")),
+      instrument_count: descriptors.length + openedBank.legacyCount,
+    } : {
+      schema_version: 1,
+      id: primarySlug,
+      name: instrumentNames[0],
+      instrument_count: 1,
+      created_by: "RF-Soundfonts Instrument Builder",
+    };
+    const manifestPath = openedBank?.manifestPath || "bank.json";
+    replacements.set(manifestPath.toLocaleLowerCase("en-US"), {
+      name: manifestPath,
+      data: encoder.encode(JSON.stringify(manifest, null, 2)),
+    });
+
+    const entries = [];
+    const consumed = new Set();
+    if (openedBank) {
+      for (const entry of openedBank.entries) {
+        const replacement = replacements.get(entry.foldedName);
+        entries.push(replacement || { name: entry.name, data: await extractZipEntry(openedBank, entry) });
+        if (replacement) consumed.add(entry.foldedName);
       }
-      setBuilderMessage(`${validation.name}.rfbank exported. Add it from the Library tab to play it.`, "success");
+    }
+    for (const [path, replacement] of replacements) {
+      if (!consumed.has(path)) entries.push(replacement);
+    }
+    entries.push(...addedEntries.values());
+    const totalBytes = entries.reduce((total, entry) => total + entry.data.length, 0);
+    if (entries.length > MAX_BANK_ENTRIES || totalBytes > MAX_BANK_BYTES) {
+      throw new Error("The edited RF Bank exceeds the 8,192-entry or 128 MB runtime limit.");
+    }
+    return {
+      blob: makeZip(entries),
+      suggestedName: openedBank?.fileName || `${primarySlug}.rfbank`,
+      label: openedBank?.manifest?.name || instrumentNames[0],
+    };
+  };
+
+  const saveBankBlob = async (prepared, mode, forceDownload = false) => {
+    let handle = mode === "same" ? openedBank?.handle : null;
+    if (!handle && !forceDownload && typeof window.showSaveFilePicker === "function") {
+      handle = await window.showSaveFilePicker({
+        suggestedName: prepared.suggestedName,
+        types: [{
+          description: "RF Instrument Bank",
+          accept: { "application/vnd.rackforge.bank+zip": [".rfbank"] },
+        }],
+      });
+    }
+    if (handle?.createWritable) {
+      const writable = await handle.createWritable();
+      await writable.write(prepared.blob);
+      await writable.close();
+      if (openedBank) {
+        openedBank.handle = handle;
+        openedBank.fileName = handle.name || prepared.suggestedName;
+        renderOpenedBankContext();
+      }
+      return;
+    }
+    const url = URL.createObjectURL(prepared.blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = prepared.suggestedName;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  };
+
+  const runBankSave = async (mode, forceDownload = false) => {
+    builderExport.disabled = true;
+    if (builderSave) builderSave.disabled = true;
+    setBuilderMessage(openedBank ? "Repacking RF Bank without dropping preserved content…" : "Packing instrument and samples…");
+    try {
+      const prepared = await prepareBankEntries();
+      await saveBankBlob(prepared, mode, forceDownload);
+      setBuilderMessage(`${prepared.label} saved successfully.`, "success");
     } catch (error) {
-      setBuilderMessage(error instanceof Error ? error.message : "The RF Bank could not be exported.", "error");
+      if (error?.name !== "AbortError") {
+        setBuilderMessage(error instanceof Error ? error.message : "The RF Bank could not be saved.", "error");
+      }
     } finally {
       builderExport.disabled = false;
+      if (builderSave) builderSave.disabled = false;
     }
-  });
+  };
+
+  if (builderExport) builderExport.title = "Save a copy · Hold Shift to use the portable download fallback";
+  builderExport?.addEventListener("click", (event) => runBankSave("as", event.shiftKey));
+  builderSave?.addEventListener("click", () => runBankSave("same"));
 
   if (builderViewport) {
     builderName.value = builderState.name;
-    renderEnvelope(globalEnvelopeHost, builderState.envelope, persistBuilder);
+    renderEnvelope(globalEnvelopeHost, builderState.envelope, () => {
+      beginBuilderAudition();
+      persistBuilder();
+    });
     renderBuilderKeys();
     renderBuilderZones();
+    renderOpenedBankContext();
     updateBuilderZoom(builderRowHeight);
     document.querySelector('[data-tab="builder"]')?.addEventListener("click", () => {
       if (builderDidInitialScroll) return;

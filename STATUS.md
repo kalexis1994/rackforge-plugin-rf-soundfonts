@@ -1,18 +1,24 @@
 # RF-Soundfonts project status
 
-Snapshot date: 2026-08-11
+Snapshot date: 2026-08-22
 
 Plugin ID: `org.rackforge.rf-soundfonts`
 
 ## Product boundary
 
-RF-Soundfonts is a library instrument. It discovers and plays sounds from
-installed DLS, SFZ and supported sample-library formats. It does not create a
-second Custom Program catalog and does not own layers, splits or complete
-performance setups.
+RF-Soundfonts is a library instrument and RF Bank authoring tool. It discovers
+and plays sounds from installed DLS, SFZ and supported sample-library formats.
+Its Builder owns sample zones and velocity layers inside an individual RF
+instrument, but it does not create a second performance catalog or own LIVE
+layers, splits or complete performance setups.
 
 - PLAY browses libraries and selects one sound.
 - CONFIG reports and manages installed sound resources.
+- CONFIG's Builder creates and losslessly edits native RF Bank instruments.
+- Creating or editing a Builder instrument auditions its current playable
+  draft through the active RackForge MIDI and audio instance without installing
+  a temporary library. This uses the explicit `edit_mode` protocol state (`0`
+  normal, `1` editing) instead of inferring intent from the open tab.
 - RackForge LIVE owns layers, splits, MIDI routing, levels and panorama.
 - RackForge presets save the complete rack and the selected plugin sound.
 
@@ -50,11 +56,13 @@ performance setups.
 
 ## Deliberately not implemented
 
-- Custom Programs or a plugin-specific program editor.
+- A second Custom Program or performance-program catalog.
 - Plugin-owned layers, splits or performance routing.
 - Plugin-owned chorus, exciter or room-reverb chains.
 - Bank Select and Program Change MIDI.
 - Per-channel multitimbral parts.
+- Rewriting Kontakt-derived NKI maps from the browser Builder; they are
+  preserved read-only when an RF Bank is saved.
 
 ## Current limitations
 

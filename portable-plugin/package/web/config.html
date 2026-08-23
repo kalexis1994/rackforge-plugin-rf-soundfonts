@@ -68,11 +68,32 @@
                 <span>Instrument</span>
                 <input type="text" maxlength="80" value="My RF Instrument" data-builder-name>
               </label>
+              <div class="builder-audition" data-builder-audition data-state="idle" data-edit-mode="0">
+                <span aria-hidden="true"></span>
+                <div>
+                  <strong>Audition idle</strong>
+                  <small>Open or create an instrument to route MIDI and audio here.</small>
+                </div>
+              </div>
               <div class="builder-actions">
+                <button type="button" data-builder-open>Open RF Bank</button>
                 <button type="button" data-builder-new-zone>New zone</button>
+                <button type="button" data-builder-save hidden>Save</button>
                 <button type="button" class="primary-action" data-builder-export>Export RF Bank</button>
               </div>
             </div>
+            <section class="builder-bank-context" data-builder-bank-context hidden>
+              <div>
+                <span>OPEN RF BANK</span>
+                <strong data-builder-bank-name></strong>
+                <small data-builder-bank-detail></small>
+              </div>
+              <label>
+                <span>Editable instrument</span>
+                <select data-builder-instrument></select>
+              </label>
+              <button type="button" data-builder-new-bank>New blank</button>
+            </section>
             <section class="builder-envelope" aria-labelledby="builder-envelope-title">
               <div>
                 <strong id="builder-envelope-title">Instrument envelope</strong>
@@ -85,7 +106,7 @@
                 <strong>Key zones</strong>
                 <span data-builder-summary>No zones yet</span>
               </div>
-              <span>Ctrl + wheel to zoom · Double-click a zone to edit</span>
+              <span>Drag block edges to resize · Shared edges move together · Ctrl + wheel to zoom</span>
             </div>
             <div class="builder-viewport" data-builder-viewport tabindex="0"
                  aria-label="Vertical keyboard zone editor">
@@ -98,6 +119,7 @@
               Add a zone, assign one or more velocity layers, then export the instrument as an RF Bank.
             </div>
             <input type="file" accept=".wav,.wave,.flac,audio/wav,audio/flac" multiple hidden data-builder-samples>
+            <input type="file" accept=".rfbank,application/vnd.rackforge.bank+zip,application/zip" hidden data-builder-open-file>
           </section>
         </div>
       </section>
@@ -119,6 +141,14 @@
             <label><span>High key</span><input type="number" min="0" max="127" data-zone-high></label>
             <label><span>Root key</span><input type="number" min="0" max="127" data-zone-root></label>
           </div>
+          <label class="zone-color-field">
+            <span>Zone color</span>
+            <div class="zone-color-control">
+              <input type="color" aria-label="Zone color" data-zone-color>
+              <output data-zone-color-output></output>
+              <div class="zone-color-presets" aria-label="Zone color presets" data-zone-color-presets></div>
+            </div>
+          </label>
           <label class="override-switch">
             <input type="checkbox" data-zone-envelope-override>
             <span>Override instrument envelope for this zone</span>
@@ -128,7 +158,7 @@
             <div class="layer-heading">
               <div>
                 <strong>Velocity layers</strong>
-                <span>Each layer selects its own sample and velocity range.</span>
+              <span>Add sample cards and define an independent velocity range for each one. WAV and FLAC are supported.</span>
               </div>
               <button type="button" data-layer-add>Add layer</button>
             </div>
@@ -144,6 +174,6 @@
         </footer>
       </div>
     </dialog>
-    <script src="app.js" defer></script>
+    <script src="app.js?v=0.6.2" defer></script>
   </body>
 </html>
