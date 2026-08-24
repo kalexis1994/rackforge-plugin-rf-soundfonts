@@ -94,6 +94,11 @@ instrument map, sample and artwork file, and writes a small `bank.json`. The
 plugin keeps the compressed archive in memory but decodes only the samples used
 by the selected instrument.
 
+Selecting an `.sfz` follows the same library flow. RackForge collects its
+includes, WAV/FLAC samples and explicit surface artwork into a portable RF
+Bank, while the player retains SFZ velocity/key regions, envelopes, controller
+conditions and modulation, tuning, loops and choke groups.
+
 ## Bank-owned presentation
 
 PLAY is a constrained renderer rather than one hard-coded instrument skin.
@@ -152,7 +157,7 @@ tooling without deploy keys or repository secrets.
 
 ## Compatibility
 
-RF-Soundfonts `0.6.2` targets RackForge Plugin API `1.7`, the portable
+RF-Soundfonts `0.6.3` targets RackForge Plugin API `1.7`, the portable
 `wasm-v1` runtime, and the `little@1` controller surface. RackForge SDK sources
 and package tooling remain pinned to tested Git revisions for reproducible
 builds.

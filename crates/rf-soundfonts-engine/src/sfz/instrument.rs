@@ -414,7 +414,7 @@ impl SampledRegion {
     }
 
     /// Collapses the region's modulation into the voice parameters.
-    fn resolve(&self, cc: &CcState, curves: &BTreeMap<u32, Curve>) -> VoiceConfig {
+    pub fn resolve(&self, cc: &CcState, curves: &BTreeMap<u32, Curve>) -> VoiceConfig {
         let mut gain_db = self.volume_db;
         for modulation in &self.amplitude_cc {
             // `amplitude_oncc` is a percentage of full level, so a controller
@@ -471,7 +471,7 @@ fn shape(position: f32, curve: Option<u32>, curves: &BTreeMap<u32, Curve>) -> f3
 }
 
 /// Reads `set_cc` and `set_hdcc` into the starting controller state.
-fn control_defaults(control: &OpcodeMap) -> CcState {
+pub fn control_defaults(control: &OpcodeMap) -> CcState {
     let mut state = CcState::default();
     for (name, value) in control {
         if let Some(number) = name.strip_prefix("set_hdcc") {
@@ -488,6 +488,37 @@ fn control_defaults(control: &OpcodeMap) -> CcState {
 }
 
 fn region_from(opcodes: &OpcodeMap, wave_index: usize, sample: &StreamedSample) -> SampledRegion {
+    region_from_sample(
+        opcodes,
+        wave_index,
+        sample.frame_count,
+        sample.header.sample_loop,
+        sample.is_fully_resident(),
+    )
+}
+
+/// Compiles one SFZ region against a fully resident portable sample.
+pub fn resident_region(
+    opcodes: &OpcodeMap,
+    wave_index: usize,
+    sample: &crate::Wave,
+) -> SampledRegion {
+    region_from_sample(
+        opcodes,
+        wave_index,
+        sample.frame_count(),
+        sample.sample_params.and_then(|params| params.sample_loop),
+        true,
+    )
+}
+
+fn region_from_sample(
+    opcodes: &OpcodeMap,
+    wave_index: usize,
+    frame_count: usize,
+    inherited_loop: Option<crate::SampleLoop>,
+    fully_resident: bool,
+) -> SampledRegion {
     let number = |name: &str| {
         opcodes
             .get(name)
@@ -523,7 +554,7 @@ fn region_from(opcodes: &OpcodeMap, wave_index: usize, sample: &StreamedSample) 
         // the document says, and five milliseconds is inaudible as a fade.
         off_time: number("off_time").unwrap_or(0.005).max(0.001),
         envelope: envelope_from(opcodes),
-        sample_loop: loop_from(opcodes, sample),
+        sample_loop: loop_from(opcodes, frame_count, inherited_loop, fully_resident),
         gates: gates_from(opcodes),
         amplitude_cc: modulations_from(opcodes, "amplitude_oncc", "amplitude_curvecc"),
         pan_cc: modulations_from(opcodes, "pan_oncc", "pan_curvecc"),
@@ -553,7 +584,12 @@ fn envelope_from(opcodes: &OpcodeMap) -> EnvelopeSpec {
     }
 }
 
-fn loop_from(opcodes: &OpcodeMap, sample: &StreamedSample) -> Option<crate::SampleLoop> {
+fn loop_from(
+    opcodes: &OpcodeMap,
+    frame_count: usize,
+    inherited_loop: Option<crate::SampleLoop>,
+    fully_resident: bool,
+) -> Option<crate::SampleLoop> {
     let mode = opcodes.get("loop_mode").map(String::as_str);
     if matches!(mode, Some("no_loop") | Some("one_shot")) {
         return None;
@@ -576,7 +612,7 @@ fn loop_from(opcodes: &OpcodeMap, sample: &StreamedSample) -> Option<crate::Samp
     let (start, end) = match explicit {
         Some(points) => points,
         None if mode.is_some() => {
-            let inherited = sample.header.sample_loop?;
+            let inherited = inherited_loop?;
             (inherited.start, inherited.end)
         }
         None => return None,
@@ -586,8 +622,7 @@ fn loop_from(opcodes: &OpcodeMap, sample: &StreamedSample) -> Option<crate::Samp
     // forward, so a loop pointing past the resident head is one the voice
     // could never reach. Better a note that stops than a note that refuses to
     // start: a voice that cannot be built is an instrument that says nothing.
-    let reachable = sample.is_fully_resident();
-    (start < end && end <= sample.frame_count && reachable)
+    (start < end && end <= frame_count && fully_resident)
         .then_some(crate::SampleLoop { start, end })
 }
 

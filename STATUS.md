@@ -66,16 +66,18 @@ layers, splits or complete performance setups.
 
 ## Current limitations
 
-- The native adapter reads DLS and SFZ libraries; the portable component reads
-  SF2 SoundFonts. The two do not yet expose identical formats.
+- The native adapter reads DLS and SFZ libraries. The portable component reads
+  SF2 SoundFonts and packaged RF instrument libraries, including directly
+  selected SFZ maps with their includes, WAV/FLAC samples and declared artwork.
+  Portable DLS playback is still pending.
 - DLS-2 articulation coverage is partial.
 - Proprietary or encrypted library content may be rejected.
 - Large libraries still require ARM64 memory and CPU profiling.
 
 ## Next recommended milestone
 
-- Port the DLS and SFZ engine to the portable component so both runtimes play
-  the same libraries.
+- Port DLS playback to the portable component so both runtimes play the same
+  installed libraries.
 - Run catalog, state and rendered-audio conformance tests across Windows,
   Android and Raspberry Pi.
 - Add redistributable fixture banks so CI can exercise the complete loading

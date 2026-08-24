@@ -10,12 +10,15 @@ use image::codecs::jpeg::JpegEncoder;
 use rf_soundfonts::nki::document::{
     NkiDocument, NkiEnvelope, NkiFilter, NkiProgramEffect, NkiZone,
 };
+use rf_soundfonts::sfz::instrument::{CcState, SampledRegion, control_defaults, resident_region};
+use rf_soundfonts::sfz::parse::{Curve, SfzDocument};
 use rf_soundfonts::{
     EnvelopeSpec, LfoSpec, PitchEnvelopeSpec, SampleLoop, SampleParams, Voice, VoiceConfig, Wave,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
+use std::path::Path;
 use std::sync::Arc;
 use zip::ZipArchive;
 
@@ -23,6 +26,8 @@ use crate::nki_effects::{EffectControls, EffectRack, StereoBiquad};
 
 const MAX_ARCHIVE_ENTRIES: usize = 8_192;
 const MAX_MAP_BYTES: u64 = 2 * 1_048_576;
+const MAX_EXPANDED_SFZ_BYTES: usize = 16 * 1_048_576;
+const MAX_SFZ_REGIONS: usize = 8_192;
 const MAX_ARTWORK_BYTES: u64 = 4 * 1_048_576;
 const MAX_SELECTED_SAMPLE_BYTES: u64 = 160 * 1_048_576;
 const MAX_VOICES: usize = 128;
@@ -37,6 +42,8 @@ struct BankManifest {
     id: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    instrument_path: String,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -241,8 +248,23 @@ impl RfInstrument {
 struct InstrumentEntry {
     id: String,
     name: String,
-    document: NkiDocument,
+    map: InstrumentMap,
     artwork_data_url: Option<String>,
+}
+
+#[derive(Clone)]
+enum InstrumentMap {
+    Mapped(NkiDocument),
+    Sfz(SfzMap),
+}
+
+#[derive(Clone)]
+struct SfzMap {
+    document: SfzDocument,
+    /// Original `sample=` value to normalised archive path.
+    sample_paths: BTreeMap<String, String>,
+    /// Explicit surface artwork declared by the instrument, when present.
+    artwork_path: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -255,6 +277,7 @@ struct SampleEntry {
 enum MapKind {
     Nki,
     Rf,
+    Sfz,
 }
 
 pub struct Library {
@@ -262,7 +285,10 @@ pub struct Library {
     id: String,
     name: String,
     instruments: Vec<InstrumentEntry>,
+    /// Basename lookup retained for Kontakt and native RF maps.
     samples: BTreeMap<String, SampleEntry>,
+    /// Full, case-folded archive paths used by SFZ.
+    sample_paths: BTreeMap<String, SampleEntry>,
 }
 
 struct Region {
@@ -272,6 +298,7 @@ struct Region {
     lfo: LfoSpec,
     modulation_cc: Option<u8>,
     filters: Vec<NkiFilter>,
+    sfz: Option<SampledRegion>,
 }
 
 struct ActiveVoice {
@@ -279,6 +306,7 @@ struct ActiveVoice {
     voice: Voice,
     modulation_cc: Option<u8>,
     filters: Vec<StereoBiquad>,
+    group: u32,
 }
 
 struct LoadedInstrument {
@@ -290,6 +318,9 @@ struct LoadedInstrument {
     pitch_bend_cents: [f32; 16],
     controllers: [[f32; 128]; 16],
     effects: EffectRack,
+    sfz_curves: BTreeMap<u32, Curve>,
+    sfz_defaults: CcState,
+    sfz_normalisation: f32,
 }
 
 pub struct Player {
@@ -305,6 +336,37 @@ fn extension(name: &str) -> &str {
 
 fn basename(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+fn normalize_archive_path(path: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    if path.starts_with('/') || path.contains(':') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            value => parts.push(value),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+fn archive_parent(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+fn resolve_archive_reference(base: &str, prefix: &str, reference: &str) -> Option<String> {
+    let combined = [base, prefix.trim_matches(['/', '\\']), reference]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    normalize_archive_path(&combined)
 }
 
 fn slug(value: &str) -> String {
@@ -349,6 +411,107 @@ fn read_entry(
     Ok(bytes)
 }
 
+fn parse_sfz_map(
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
+    path: &str,
+    map_bytes: &[u8],
+    text_entries: &BTreeMap<String, SampleEntry>,
+    sample_entries: &BTreeMap<String, SampleEntry>,
+    artwork_entries: &BTreeMap<String, SampleEntry>,
+) -> Result<SfzMap, String> {
+    let source = String::from_utf8_lossy(map_bytes);
+    let base = archive_parent(path);
+    let mut macros = BTreeMap::new();
+    let expanded = rf_soundfonts::sfz::preprocess::expand_text_with(
+        &source,
+        Path::new(base),
+        &mut macros,
+        |include| {
+            let display = include.to_string_lossy();
+            let normalized = normalize_archive_path(&display).ok_or_else(|| {
+                rf_soundfonts::SoundfontError::Invalid(format!(
+                    "unsafe SFZ include path {display:?}"
+                ))
+            })?;
+            let key = normalized.to_ascii_lowercase();
+            let entry = text_entries.get(&key).ok_or_else(|| {
+                rf_soundfonts::SoundfontError::Invalid(format!(
+                    "missing SFZ include {normalized:?}"
+                ))
+            })?;
+            let bytes = read_entry(archive, entry.archive_index, MAX_MAP_BYTES)
+                .map_err(rf_soundfonts::SoundfontError::Invalid)?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        },
+    )
+    .map_err(|error| format!("{}: {error}", basename(path)))?;
+    if expanded.len() > MAX_EXPANDED_SFZ_BYTES {
+        return Err(format!(
+            "{} expands beyond the supported SFZ text size",
+            basename(path)
+        ));
+    }
+    let document = rf_soundfonts::sfz::parse::parse(&expanded)
+        .map_err(|error| format!("{}: {error}", basename(path)))?;
+    if document.regions.len() > MAX_SFZ_REGIONS {
+        return Err(format!("{} declares too many SFZ regions", basename(path)));
+    }
+    let default_path = document
+        .control
+        .get("default_path")
+        .map(String::as_str)
+        .unwrap_or("");
+    let mut sample_paths = BTreeMap::new();
+    let mut missing = BTreeSet::new();
+    for region in &document.regions {
+        let Some(reference) = region.get("sample") else {
+            continue;
+        };
+        let Some(resolved) = resolve_archive_reference(base, default_path, reference) else {
+            return Err(format!(
+                "{} contains an unsafe sample path {reference:?}",
+                basename(path)
+            ));
+        };
+        let key = resolved.to_ascii_lowercase();
+        if sample_entries.contains_key(&key) {
+            sample_paths.insert(reference.clone(), key);
+        } else {
+            missing.insert(resolved);
+        }
+    }
+    if !missing.is_empty() {
+        let examples = missing
+            .iter()
+            .take(4)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "{} is missing {} referenced sample(s): {}",
+            basename(path),
+            missing.len(),
+            examples
+        ));
+    }
+    if sample_paths.is_empty() {
+        return Err(format!("{} references no playable samples", basename(path)));
+    }
+    let artwork_path = ["image", "image_controls", "image_hd"]
+        .into_iter()
+        .filter_map(|opcode| document.control.get(opcode))
+        .find_map(|reference| {
+            resolve_archive_reference(base, "", reference)
+                .map(|path| path.to_ascii_lowercase())
+                .filter(|path| artwork_entries.contains_key(path))
+        });
+    Ok(SfzMap {
+        document,
+        sample_paths,
+        artwork_path,
+    })
+}
+
 fn artwork_data_url(bytes: &[u8], name: &str) -> Result<String, String> {
     let format = match extension(name).to_ascii_lowercase().as_str() {
         "png" => image::ImageFormat::Png,
@@ -387,7 +550,10 @@ impl Library {
         let mut manifest_index = None;
         let mut map_entries = Vec::new();
         let mut indexed_samples: BTreeMap<String, (SampleEntry, usize)> = BTreeMap::new();
+        let mut indexed_sample_paths = BTreeMap::new();
+        let mut indexed_text = BTreeMap::new();
         let mut indexed_artwork: BTreeMap<String, (SampleEntry, usize)> = BTreeMap::new();
+        let mut indexed_artwork_paths = BTreeMap::new();
         for index in 0..archive.len() {
             let file = archive
                 .by_index(index)
@@ -406,12 +572,42 @@ impl Library {
                 map_entries.push((name, index, MapKind::Nki));
             } else if folded_extension == "rfinstrument" {
                 map_entries.push((name, index, MapKind::Rf));
+            } else if folded_extension == "sfz" {
+                map_entries.push((name.clone(), index, MapKind::Sfz));
+                let path = normalize_archive_path(&name)
+                    .ok_or_else(|| format!("unsafe SFZ path in RF bank: {name:?}"))?;
+                indexed_text.insert(
+                    path.to_ascii_lowercase(),
+                    SampleEntry {
+                        archive_index: index,
+                        expanded_bytes: file.size(),
+                    },
+                );
+            } else if matches!(folded_extension.as_str(), "txt" | "inc" | "sfzh") {
+                let path = normalize_archive_path(&name)
+                    .ok_or_else(|| format!("unsafe include path in RF bank: {name:?}"))?;
+                indexed_text.insert(
+                    path.to_ascii_lowercase(),
+                    SampleEntry {
+                        archive_index: index,
+                        expanded_bytes: file.size(),
+                    },
+                );
             } else if matches!(folded_extension.as_str(), "wav" | "wave" | "flac") {
                 let key = basename(&name).to_ascii_lowercase();
                 let candidate = SampleEntry {
                     archive_index: index,
                     expanded_bytes: file.size(),
                 };
+                let path = normalize_archive_path(&name)
+                    .ok_or_else(|| format!("unsafe sample path in RF bank: {name:?}"))?
+                    .to_ascii_lowercase();
+                if indexed_sample_paths
+                    .insert(path.clone(), candidate)
+                    .is_some()
+                {
+                    return Err(format!("duplicate sample path in RF bank: {path:?}"));
+                }
                 // A shallower path wins, matching the native Kontakt loader.
                 let candidate_depth = name.matches('/').count();
                 match indexed_samples.get(&key) {
@@ -431,6 +627,15 @@ impl Library {
                     expanded_bytes: file.size(),
                 };
                 let candidate_depth = name.matches('/').count();
+                let path = normalize_archive_path(&name)
+                    .ok_or_else(|| format!("unsafe artwork path in RF bank: {name:?}"))?
+                    .to_ascii_lowercase();
+                if indexed_artwork_paths
+                    .insert(path.clone(), candidate)
+                    .is_some()
+                {
+                    return Err(format!("duplicate artwork path in RF bank: {path:?}"));
+                }
                 match indexed_artwork.get(&key) {
                     Some((_, existing_depth)) if candidate_depth >= *existing_depth => {}
                     _ => {
@@ -456,6 +661,21 @@ impl Library {
             return Err("this RF bank schema is newer than the plugin".into());
         }
 
+        if let Some(selected_path) = manifest
+            .as_ref()
+            .map(|value| value.instrument_path.trim())
+            .filter(|value| !value.is_empty())
+        {
+            let selected_path = normalize_archive_path(selected_path)
+                .ok_or_else(|| "bank.json has an unsafe instrument_path".to_string())?;
+            map_entries.retain(|(path, _, _)| path.eq_ignore_ascii_case(&selected_path));
+            if map_entries.is_empty() {
+                return Err(format!(
+                    "bank.json selects a missing instrument {selected_path:?}"
+                ));
+            }
+        }
+
         map_entries.sort_by(|left, right| left.0.cmp(&right.0));
         let mut instruments = Vec::new();
         let mut used_ids = BTreeSet::new();
@@ -464,7 +684,7 @@ impl Library {
             let fallback = basename(&path)
                 .rsplit_once('.')
                 .map_or(basename(&path), |(stem, _)| stem);
-            let (source_id, name, document, id_prefix) = match kind {
+            let (source_id, name, map, id_prefix) = match kind {
                 MapKind::Nki => {
                     let text = rf_soundfonts::nki::document::inflate(&map_bytes)
                         .map_err(|error| format!("{}: {error}", basename(&path)))?;
@@ -475,7 +695,7 @@ impl Library {
                     } else {
                         document.name.trim().to_string()
                     };
-                    (slug(&name), name, document, "nki")
+                    (slug(&name), name, InstrumentMap::Mapped(document), "nki")
                 }
                 MapKind::Rf => {
                     let instrument =
@@ -485,31 +705,45 @@ impl Library {
                     let (id, name, document) = instrument
                         .into_document(fallback)
                         .map_err(|error| format!("{}: {error}", basename(&path)))?;
-                    (id, name, document, "rf")
+                    (id, name, InstrumentMap::Mapped(document), "rf")
+                }
+                MapKind::Sfz => {
+                    let sfz = parse_sfz_map(
+                        &mut archive,
+                        &path,
+                        &map_bytes,
+                        &indexed_text,
+                        &indexed_sample_paths,
+                        &indexed_artwork_paths,
+                    )?;
+                    let name = fallback.to_string();
+                    (slug(&name), name, InstrumentMap::Sfz(sfz), "sfz")
                 }
             };
-            if document.zones.is_empty() {
-                continue;
-            }
-            let missing: BTreeSet<_> = document
-                .zones
-                .iter()
-                .map(|zone| zone.sample.to_ascii_lowercase())
-                .filter(|sample| !indexed_samples.contains_key(sample))
-                .collect();
-            if !missing.is_empty() {
-                let examples = missing
+            if let InstrumentMap::Mapped(document) = &map {
+                if document.zones.is_empty() {
+                    continue;
+                }
+                let missing: BTreeSet<_> = document
+                    .zones
                     .iter()
-                    .take(4)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(format!(
-                    "{} is missing {} referenced sample(s): {}",
-                    basename(&path),
-                    missing.len(),
-                    examples
-                ));
+                    .map(|zone| zone.sample.to_ascii_lowercase())
+                    .filter(|sample| !indexed_samples.contains_key(sample))
+                    .collect();
+                if !missing.is_empty() {
+                    let examples = missing
+                        .iter()
+                        .take(4)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!(
+                        "{} is missing {} referenced sample(s): {}",
+                        basename(&path),
+                        missing.len(),
+                        examples
+                    ));
+                }
             }
             let base_id = source_id;
             let mut unique_id = base_id.clone();
@@ -518,28 +752,40 @@ impl Library {
                 unique_id = format!("{base_id}-{suffix}");
                 suffix += 1;
             }
-            let artwork_data_url = document
-                .wallpaper
-                .as_ref()
-                .and_then(|wallpaper| indexed_artwork.get(&wallpaper.to_ascii_lowercase()))
-                .and_then(|(entry, _)| {
-                    read_entry(
+            let artwork_data_url = match &map {
+                InstrumentMap::Mapped(document) => document
+                    .wallpaper
+                    .as_ref()
+                    .and_then(|wallpaper| indexed_artwork.get(&wallpaper.to_ascii_lowercase()))
+                    .and_then(|(entry, _)| {
+                        read_entry(
+                            &mut archive,
+                            entry.archive_index,
+                            entry.expanded_bytes.min(MAX_ARTWORK_BYTES),
+                        )
+                        .ok()
+                    })
+                    .and_then(|bytes| {
+                        document
+                            .wallpaper
+                            .as_deref()
+                            .and_then(|name| artwork_data_url(&bytes, name).ok())
+                    }),
+                InstrumentMap::Sfz(sfz) => sfz.artwork_path.as_ref().and_then(|path| {
+                    let entry = indexed_artwork_paths.get(path)?;
+                    let bytes = read_entry(
                         &mut archive,
                         entry.archive_index,
                         entry.expanded_bytes.min(MAX_ARTWORK_BYTES),
                     )
-                    .ok()
-                })
-                .and_then(|bytes| {
-                    document
-                        .wallpaper
-                        .as_deref()
-                        .and_then(|name| artwork_data_url(&bytes, name).ok())
-                });
+                    .ok()?;
+                    artwork_data_url(&bytes, path).ok()
+                }),
+            };
             instruments.push(InstrumentEntry {
                 id: format!("{id_prefix}.{unique_id}"),
                 name,
-                document,
+                map,
                 artwork_data_url,
             });
         }
@@ -556,6 +802,7 @@ impl Library {
             .into_iter()
             .map(|(key, (entry, _))| (key, entry))
             .collect();
+        let sample_paths = indexed_sample_paths;
         Ok(Self {
             bytes,
             id: if manifest_id.is_empty() {
@@ -570,6 +817,7 @@ impl Library {
             },
             instruments,
             samples,
+            sample_paths,
         })
     }
 
@@ -579,10 +827,24 @@ impl Library {
             .iter()
             .find(|instrument| instrument.id == id)
             .ok_or_else(|| format!("unknown RF instrument {id:?}"))?;
+        match &instrument.map {
+            InstrumentMap::Mapped(document) => {
+                self.load_mapped(&instrument.name, document, sample_rate)
+            }
+            InstrumentMap::Sfz(sfz) => self.load_sfz(&instrument.name, sfz, sample_rate),
+        }
+    }
+
+    fn load_mapped(
+        &self,
+        instrument_name: &str,
+        document: &NkiDocument,
+        sample_rate: u32,
+    ) -> Result<LoadedInstrument, String> {
         let mut required = BTreeMap::<String, usize>::new();
         let mut sample_keys = Vec::new();
         let mut expanded_bytes = 0_u64;
-        for zone in &instrument.document.zones {
+        for zone in &document.zones {
             let key = zone.sample.to_ascii_lowercase();
             let Some(entry) = self.samples.get(&key) else {
                 continue;
@@ -592,7 +854,7 @@ impl Library {
                 if expanded_bytes > MAX_SELECTED_SAMPLE_BYTES {
                     return Err(format!(
                         "instrument {:?} needs too much decoded sample data",
-                        instrument.name
+                        instrument_name
                     ));
                 }
                 let wave_index = sample_keys.len();
@@ -603,7 +865,7 @@ impl Library {
         if sample_keys.is_empty() {
             return Err(format!(
                 "instrument {:?} found none of its samples",
-                instrument.name
+                instrument_name
             ));
         }
 
@@ -623,13 +885,12 @@ impl Library {
         }
 
         let mut regions = Vec::new();
-        for zone in &instrument.document.zones {
+        for zone in &document.zones {
             let key = zone.sample.to_ascii_lowercase();
             let Some(&wave_index) = required.get(&key) else {
                 continue;
             };
-            let envelope = instrument
-                .document
+            let envelope = document
                 .groups
                 .get(zone.group)
                 .copied()
@@ -637,7 +898,7 @@ impl Library {
                 .map_or_else(EnvelopeSpec::default, envelope_from);
             let mut envelope = envelope;
             envelope.release_seconds = envelope.release_seconds.max(MINIMUM_RELEASE_SECONDS);
-            let group_lfo = instrument.document.group_lfos.get(&zone.group).copied();
+            let group_lfo = document.group_lfos.get(&zone.group).copied();
             regions.push(Region {
                 zone: zone.clone(),
                 wave_index,
@@ -651,22 +912,22 @@ impl Library {
                     mod_wheel_attenuation_depth_centibels: 0.0,
                 }),
                 modulation_cc: group_lfo.and_then(|lfo| lfo.controller),
-                filters: instrument
-                    .document
+                filters: document
                     .effects
                     .group_filters
                     .get(&zone.group)
                     .cloned()
                     .unwrap_or_default(),
+                sfz: None,
             });
         }
         if regions.is_empty() {
             return Err(format!(
                 "instrument {:?} has no playable zones",
-                instrument.name
+                instrument_name
             ));
         }
-        let effects = EffectRack::new(&instrument.document.effects, sample_rate)
+        let effects = EffectRack::new(&document.effects, sample_rate)
             .map_err(|error| format!("cannot prepare RF instrument effects: {error}"))?;
         Ok(LoadedInstrument {
             waves,
@@ -677,6 +938,118 @@ impl Library {
             pitch_bend_cents: [0.0; 16],
             controllers: [[0.0; 128]; 16],
             effects,
+            sfz_curves: BTreeMap::new(),
+            sfz_defaults: CcState::default(),
+            sfz_normalisation: 1.0,
+        })
+    }
+
+    fn load_sfz(
+        &self,
+        instrument_name: &str,
+        sfz: &SfzMap,
+        sample_rate: u32,
+    ) -> Result<LoadedInstrument, String> {
+        let mut required = BTreeMap::<String, usize>::new();
+        let mut sample_keys = Vec::new();
+        let mut expanded_bytes = 0_u64;
+        for path in sfz.sample_paths.values() {
+            let Some(entry) = self.sample_paths.get(path) else {
+                continue;
+            };
+            if !required.contains_key(path) {
+                expanded_bytes = expanded_bytes.saturating_add(entry.expanded_bytes);
+                if expanded_bytes > MAX_SELECTED_SAMPLE_BYTES {
+                    return Err(format!(
+                        "SFZ instrument {instrument_name:?} needs too much decoded sample data"
+                    ));
+                }
+                required.insert(path.clone(), sample_keys.len());
+                sample_keys.push(path.clone());
+            }
+        }
+        if sample_keys.is_empty() {
+            return Err(format!(
+                "SFZ instrument {instrument_name:?} found none of its samples"
+            ));
+        }
+
+        let mut archive = ZipArchive::new(Cursor::new(self.bytes.as_ref()))
+            .map_err(|error| format!("cannot reopen RF bank: {error}"))?;
+        let mut waves = Vec::with_capacity(sample_keys.len());
+        for key in &sample_keys {
+            let entry = self.sample_paths[key];
+            let bytes = read_entry(&mut archive, entry.archive_index, entry.expanded_bytes)?;
+            let wave = if extension(key).eq_ignore_ascii_case("flac") {
+                rf_soundfonts::flac::decode(&bytes, key.clone())
+            } else {
+                rf_soundfonts::wav::decode(&bytes, key.clone())
+            }
+            .map_err(|error| format!("cannot decode SFZ sample {key:?}: {error}"))?;
+            waves.push(wave);
+        }
+
+        let mut regions = Vec::new();
+        for opcodes in &sfz.document.regions {
+            let Some(reference) = opcodes.get("sample") else {
+                continue;
+            };
+            let Some(path) = sfz.sample_paths.get(reference) else {
+                continue;
+            };
+            let Some(&wave_index) = required.get(path) else {
+                continue;
+            };
+            let compiled = resident_region(opcodes, wave_index, &waves[wave_index]);
+            let zone = NkiZone {
+                sample: reference.clone(),
+                key_low: compiled.key_low,
+                key_high: compiled.key_high,
+                root_key: compiled.pitch_keycenter,
+                velocity_low: compiled.velocity_low,
+                velocity_high: compiled.velocity_high,
+                sample_start: 0,
+                group: compiled.group as usize,
+                volume: 1.0,
+                pan: 0.0,
+                tune: 1.0,
+                sample_loop: compiled.sample_loop,
+            };
+            regions.push(Region {
+                zone,
+                wave_index,
+                envelope: compiled.envelope,
+                lfo: LfoSpec::default(),
+                modulation_cc: None,
+                filters: Vec::new(),
+                sfz: Some(compiled),
+            });
+        }
+        if regions.is_empty() {
+            return Err(format!(
+                "SFZ instrument {instrument_name:?} has no playable regions"
+            ));
+        }
+        let defaults = control_defaults(&sfz.document.control);
+        let normalisation =
+            resident_normalisation(&waves, &regions, &defaults, &sfz.document.curves);
+        let effects = EffectRack::new(
+            &rf_soundfonts::nki::document::NkiEffects::default(),
+            sample_rate,
+        )
+        .map_err(|error| format!("cannot prepare SFZ effects: {error}"))?;
+        Ok(LoadedInstrument {
+            waves,
+            regions,
+            voices: Vec::new(),
+            held: [[false; 128]; 16],
+            sustain: [false; 16],
+            pitch_bend_cents: [0.0; 16],
+            controllers: controller_matrix(&defaults),
+            effects,
+            sfz_curves: sfz.document.curves.clone(),
+            sfz_defaults: defaults,
+            sfz_normalisation: normalisation,
         })
     }
 
@@ -686,53 +1059,70 @@ impl Library {
             .iter()
             .enumerate()
             .map(|(order, instrument)| {
-                let lowest = instrument
-                    .document
-                    .zones
-                    .iter()
-                    .map(|zone| zone.key_low)
-                    .min();
-                let highest = instrument
-                    .document
-                    .zones
-                    .iter()
-                    .map(|zone| zone.key_high)
-                    .max();
-                let summary = match (lowest, highest) {
-                    (Some(low), Some(high)) => format!(
-                        "RF Instrument · {} zones · keys {low}–{high}",
-                        instrument.document.zones.len()
-                    ),
-                    _ => "RF instrument".into(),
+                let summary = match &instrument.map {
+                    InstrumentMap::Mapped(document) => {
+                        let lowest = document.zones.iter().map(|zone| zone.key_low).min();
+                        let highest = document.zones.iter().map(|zone| zone.key_high).max();
+                        let mut summary = match (lowest, highest) {
+                            (Some(low), Some(high)) => format!(
+                                "RF Instrument · {} zones · keys {low}–{high}",
+                                document.zones.len()
+                            ),
+                            _ => "RF instrument".into(),
+                        };
+                        let program_effects: Vec<_> = document
+                            .effects
+                            .program
+                            .iter()
+                            .map(|effect| match effect {
+                                NkiProgramEffect::Reverb(_) => "Reverb",
+                                NkiProgramEffect::Delay(_) => "Delay",
+                            })
+                            .collect();
+                        if !program_effects.is_empty() {
+                            summary.push_str(" · FX ");
+                            summary.push_str(&program_effects.join(" → "));
+                        }
+                        let filter_count: usize =
+                            document.effects.group_filters.values().map(Vec::len).sum();
+                        if filter_count > 0 {
+                            summary.push_str(&format!(
+                                " · {filter_count} group filter{}",
+                                if filter_count == 1 { "" } else { "s" }
+                            ));
+                        }
+                        summary
+                    }
+                    InstrumentMap::Sfz(sfz) => {
+                        let low = sfz
+                            .document
+                            .regions
+                            .iter()
+                            .filter_map(|region| {
+                                region.get("key").or_else(|| region.get("lokey")).and_then(
+                                    |value| rf_soundfonts::sfz::instrument::parse_note(value),
+                                )
+                            })
+                            .min()
+                            .unwrap_or(0);
+                        let high = sfz
+                            .document
+                            .regions
+                            .iter()
+                            .filter_map(|region| {
+                                region.get("key").or_else(|| region.get("hikey")).and_then(
+                                    |value| rf_soundfonts::sfz::instrument::parse_note(value),
+                                )
+                            })
+                            .max()
+                            .unwrap_or(127);
+                        format!(
+                            "SFZ Instrument · {} regions · {} samples · keys {low}–{high}",
+                            sfz.document.regions.len(),
+                            sfz.sample_paths.len()
+                        )
+                    }
                 };
-                let program_effects: Vec<_> = instrument
-                    .document
-                    .effects
-                    .program
-                    .iter()
-                    .map(|effect| match effect {
-                        NkiProgramEffect::Reverb(_) => "Reverb",
-                        NkiProgramEffect::Delay(_) => "Delay",
-                    })
-                    .collect();
-                let mut summary = summary;
-                if !program_effects.is_empty() {
-                    summary.push_str(" · FX ");
-                    summary.push_str(&program_effects.join(" → "));
-                }
-                let filter_count: usize = instrument
-                    .document
-                    .effects
-                    .group_filters
-                    .values()
-                    .map(Vec::len)
-                    .sum();
-                if filter_count > 0 {
-                    summary.push_str(&format!(
-                        " · {filter_count} group filter{}",
-                        if filter_count == 1 { "" } else { "s" }
-                    ));
-                }
                 let description = instrument
                     .artwork_data_url
                     .as_ref()
@@ -766,13 +1156,46 @@ fn envelope_from(shape: NkiEnvelope) -> EnvelopeSpec {
     }
 }
 
+fn controller_matrix(defaults: &CcState) -> [[f32; 128]; 16] {
+    std::array::from_fn(|_| std::array::from_fn(|index| defaults.get(index as u8)))
+}
+
+fn resident_normalisation(
+    waves: &[Wave],
+    regions: &[Region],
+    defaults: &CcState,
+    curves: &BTreeMap<u32, Curve>,
+) -> f32 {
+    let mut peak = 0.0_f32;
+    for region in regions {
+        let Some(sfz) = region.sfz.as_ref() else {
+            continue;
+        };
+        let Some(wave) = waves.get(region.wave_index) else {
+            continue;
+        };
+        let sample_peak = wave
+            .samples
+            .iter()
+            .fold(0.0_f32, |value, sample| value.max(sample.abs()));
+        if sample_peak > 0.0 {
+            peak = peak.max(sample_peak * sfz.resolve(defaults, curves).gain);
+        }
+    }
+    if peak <= 0.0 {
+        1.0
+    } else {
+        (0.25 / peak).clamp(0.05, 8.0)
+    }
+}
+
 impl LoadedInstrument {
     fn reset(&mut self) {
         self.voices.clear();
         self.held = [[false; 128]; 16];
         self.sustain = [false; 16];
         self.pitch_bend_cents = [0.0; 16];
-        self.controllers = [[0.0; 128]; 16];
+        self.controllers = controller_matrix(&self.sfz_defaults);
         self.effects.reset();
     }
 
@@ -793,35 +1216,75 @@ impl LoadedInstrument {
         }
         self.voices.retain(|voice| !voice.voice.is_finished());
 
+        let mut cc = self.sfz_defaults.clone();
+        for controller in 0..128_u8 {
+            cc.set(
+                controller,
+                self.controllers[channel][usize::from(controller)],
+            );
+        }
+
         for region in &self.regions {
             let zone = &region.zone;
-            if !(zone.key_low..=zone.key_high).contains(&note)
-                || !(zone.velocity_low..=zone.velocity_high).contains(&velocity)
-            {
+            let accepts = region.sfz.as_ref().map_or_else(
+                || {
+                    (zone.key_low..=zone.key_high).contains(&note)
+                        && (zone.velocity_low..=zone.velocity_high).contains(&velocity)
+                },
+                |sfz| sfz.accepts(note, velocity, &cc),
+            );
+            if !accepts {
                 continue;
             }
             let wave = &self.waves[region.wave_index];
-            let sample_loop = zone
-                .sample_loop
-                .or(wave.sample_params.and_then(|params| params.sample_loop))
-                .filter(|looping| valid_loop(*looping, wave.frame_count()));
-            let params = SampleParams {
-                unity_note: u16::from(zone.root_key),
-                fine_tune: 0,
-                attenuation_db: 0.0,
-                sample_loop,
+            let (params, config, group, off_by) = if let Some(sfz) = &region.sfz {
+                let mut config = sfz.resolve(&cc, &self.sfz_curves);
+                config.gain *= self.sfz_normalisation;
+                (
+                    SampleParams {
+                        unity_note: u16::from(sfz.pitch_keycenter),
+                        fine_tune: sfz.tune_cents.clamp(-32_768.0, 32_767.0).round() as i16,
+                        attenuation_db: 0.0,
+                        sample_loop: sfz.sample_loop,
+                    },
+                    config,
+                    sfz.group,
+                    sfz.off_by,
+                )
+            } else {
+                let sample_loop = zone
+                    .sample_loop
+                    .or(wave.sample_params.and_then(|params| params.sample_loop))
+                    .filter(|looping| valid_loop(*looping, wave.frame_count()));
+                (
+                    SampleParams {
+                        unity_note: u16::from(zone.root_key),
+                        fine_tune: 0,
+                        attenuation_db: 0.0,
+                        sample_loop,
+                    },
+                    VoiceConfig {
+                        amplitude_envelope: region.envelope,
+                        pitch_envelope: PitchEnvelopeSpec::default(),
+                        lfo: region.lfo,
+                        pitch_offset_cents: 1_200.0 * zone.tune.max(f32::MIN_POSITIVE).log2(),
+                        pitch_bend_range_cents: 200.0,
+                        modulation_depth: 1.0,
+                        gain: zone.volume.max(0.0),
+                        pan: zone.pan,
+                        velocity_tracking: 1.0,
+                    },
+                    zone.group as u32,
+                    None,
+                )
             };
-            let config = VoiceConfig {
-                amplitude_envelope: region.envelope,
-                pitch_envelope: PitchEnvelopeSpec::default(),
-                lfo: region.lfo,
-                pitch_offset_cents: 1_200.0 * zone.tune.max(f32::MIN_POSITIVE).log2(),
-                pitch_bend_range_cents: 200.0,
-                modulation_depth: 1.0,
-                gain: zone.volume.max(0.0),
-                pan: zone.pan,
-                velocity_tracking: 1.0,
-            };
+            if let Some(off_by) = off_by {
+                for active in &mut self.voices {
+                    if active.channel == channel && active.group == off_by {
+                        active.voice.fade_out(0.005);
+                    }
+                }
+            }
             let Ok(mut voice) = Voice::from_wave(wave, params, note, velocity, sample_rate, config)
             else {
                 continue;
@@ -838,6 +1301,7 @@ impl LoadedInstrument {
                     .iter()
                     .filter_map(|filter| StereoBiquad::new(*filter, sample_rate))
                     .collect(),
+                group,
             });
         }
         if self.voices.len() > MAX_VOICES {
@@ -1023,6 +1487,30 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn test_wave() -> Vec<u8> {
+        let mut wave = Vec::new();
+        let frames = 960_u32;
+        let data_bytes = frames * 2;
+        wave.extend_from_slice(b"RIFF");
+        wave.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wave.extend_from_slice(b"WAVEfmt ");
+        wave.extend_from_slice(&16_u32.to_le_bytes());
+        wave.extend_from_slice(&1_u16.to_le_bytes());
+        wave.extend_from_slice(&1_u16.to_le_bytes());
+        wave.extend_from_slice(&48_000_u32.to_le_bytes());
+        wave.extend_from_slice(&96_000_u32.to_le_bytes());
+        wave.extend_from_slice(&2_u16.to_le_bytes());
+        wave.extend_from_slice(&16_u16.to_le_bytes());
+        wave.extend_from_slice(b"data");
+        wave.extend_from_slice(&data_bytes.to_le_bytes());
+        for frame in 0..frames {
+            let sample =
+                ((frame as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 12_000.0) as i16;
+            wave.extend_from_slice(&sample.to_le_bytes());
+        }
+        wave
+    }
+
     #[test]
     fn slugs_are_stable_and_safe() {
         assert_eq!(slug("Hohner Colombiano"), "hohner-colombiano");
@@ -1034,6 +1522,75 @@ mod tests {
     fn path_helpers_accept_both_separators() {
         assert_eq!(basename("Samples/Accordion\\C4.WAV"), "C4.WAV");
         assert_eq!(extension("C4.WAV"), "WAV");
+    }
+
+    #[test]
+    fn sfz_bank_expands_includes_loads_artwork_and_obeys_controllers() {
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+
+        let cursor = Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("bank.json", options).unwrap();
+        archive
+            .write_all(
+                br#"{"schema_version":1,"id":"portable-sfz","name":"Portable SFZ","instrument_path":"Maps/Piano.sfz"}"#,
+            )
+            .unwrap();
+        archive.start_file("Maps/Piano.sfz", options).unwrap();
+        archive
+            .write_all(
+                b"<control> default_path=../Samples/ set_cc74=127 image=art.png\n#include \"Parts/body.inc\"",
+            )
+            .unwrap();
+        archive.start_file("Maps/Parts/body.inc", options).unwrap();
+        archive
+            .write_all(b"#include \"../Shared/region.inc\"")
+            .unwrap();
+        archive
+            .start_file("Maps/Shared/region.inc", options)
+            .unwrap();
+        archive
+            .write_all(
+                b"<group> locc74=64 ampeg_attack=0.001 ampeg_release=0.02\n<region> key=60 sample=C4.wav",
+            )
+            .unwrap();
+        // The manifest selects Piano.sfz, so an unrelated broken map must not
+        // prevent this instrument from loading.
+        archive.start_file("Maps/Other.sfz", options).unwrap();
+        archive
+            .write_all(b"<region> key=61 sample=missing.wav")
+            .unwrap();
+        archive.start_file("Maps/art.png", options).unwrap();
+        archive.write_all(png.get_ref()).unwrap();
+        archive.start_file("Samples/C4.wav", options).unwrap();
+        archive.write_all(&test_wave()).unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+
+        let mut player = Player::from_bytes(bytes, 48_000).unwrap();
+        assert_eq!(player.first_id(), "sfz.piano");
+        let catalog: serde_json::Value = serde_json::from_slice(&player.catalog_json()).unwrap();
+        assert!(
+            catalog["presets"][0]["description"]
+                .as_str()
+                .unwrap()
+                .contains(ARTWORK_MARKER)
+        );
+        assert!(player.load_preset("sfz.piano"));
+        player.dispatch_midi(0x90, 60, 100);
+        let mut output = vec![0.0; 960 * 2];
+        player.render(&mut output, 2, 0, 960, 1.0, 0.0);
+        assert!(output.iter().any(|sample| sample.abs() > 0.01));
+
+        player.reset();
+        player.dispatch_midi(0xb0, 74, 0);
+        player.dispatch_midi(0x90, 60, 100);
+        output.fill(0.0);
+        player.render(&mut output, 2, 0, 960, 1.0, 0.0);
+        assert!(output.iter().all(|sample| sample.abs() <= f32::EPSILON));
     }
 
     #[test]
@@ -1183,20 +1740,17 @@ mod tests {
             ("AcordSeles", (0, 3, 3)),
         ]);
         for instrument in &player.library.instruments {
+            let InstrumentMap::Mapped(document) = &instrument.map else {
+                panic!("unexpected SFZ instrument {}", instrument.name);
+            };
             let expected = expected_effects
                 .get(instrument.name.as_str())
                 .unwrap_or_else(|| panic!("unexpected instrument {}", instrument.name));
             assert_eq!(
                 (
-                    instrument.document.effects.program.len(),
-                    instrument
-                        .document
-                        .effects
-                        .group_filters
-                        .values()
-                        .map(Vec::len)
-                        .sum(),
-                    instrument.document.group_lfos.len(),
+                    document.effects.program.len(),
+                    document.effects.group_filters.values().map(Vec::len).sum(),
+                    document.group_lfos.len(),
                 ),
                 *expected,
                 "wrong DSP/modulation topology for {}",
@@ -1212,15 +1766,16 @@ mod tests {
             .instruments
             .iter()
             .map(|instrument| {
-                let low = instrument
-                    .document
+                let InstrumentMap::Mapped(document) = &instrument.map else {
+                    panic!("unexpected SFZ instrument {}", instrument.name);
+                };
+                let low = document
                     .zones
                     .iter()
                     .map(|zone| zone.key_low)
                     .min()
                     .unwrap();
-                let high = instrument
-                    .document
+                let high = document
                     .zones
                     .iter()
                     .map(|zone| zone.key_high)

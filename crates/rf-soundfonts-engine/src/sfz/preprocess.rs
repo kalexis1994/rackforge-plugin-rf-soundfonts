@@ -28,15 +28,14 @@ use crate::SoundfontError;
 
 /// Includes may nest; a cycle would otherwise recurse until the stack ends.
 const MAX_INCLUDE_DEPTH: usize = 16;
+const MAX_EXPANDED_BYTES: usize = 16 * 1_048_576;
 
 /// Expands `#define` and `#include` into a single self-contained document.
 pub fn expand(root: &Path) -> Result<String, SoundfontError> {
     let base = root.parent().unwrap_or(Path::new(".")).to_path_buf();
     let source = read(root)?;
     let mut macros = BTreeMap::new();
-    let mut output = String::with_capacity(source.len() * 2);
-    expand_into(&source, &base, &mut macros, &mut output, 0)?;
-    Ok(output)
+    expand_text_with(&source, &base, &mut macros, read)
 }
 
 /// Expands text that is already in memory, resolving includes against `base`.
@@ -45,8 +44,25 @@ pub fn expand_text(
     base: &Path,
     macros: &mut BTreeMap<String, String>,
 ) -> Result<String, SoundfontError> {
-    let mut output = String::with_capacity(source.len() * 2);
-    expand_into(source, base, macros, &mut output, 0)?;
+    expand_text_with(source, base, macros, read)
+}
+
+/// Expands an in-memory document through a caller-provided virtual filesystem.
+///
+/// Portable plugins use this to resolve includes inside an RF Bank without
+/// exposing native paths to WebAssembly. The callback receives each resolved
+/// include path and must return its text or a precise read error.
+pub fn expand_text_with<F>(
+    source: &str,
+    base: &Path,
+    macros: &mut BTreeMap<String, String>,
+    mut reader: F,
+) -> Result<String, SoundfontError>
+where
+    F: FnMut(&Path) -> Result<String, SoundfontError>,
+{
+    let mut output = String::with_capacity(source.len().saturating_mul(2).min(MAX_EXPANDED_BYTES));
+    expand_into(source, base, macros, &mut output, 0, &mut reader)?;
     Ok(output)
 }
 
@@ -60,32 +76,45 @@ fn read(path: &Path) -> Result<String, SoundfontError> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn expand_into(
+fn expand_into<F>(
     source: &str,
     base: &Path,
     macros: &mut BTreeMap<String, String>,
     output: &mut String,
     depth: usize,
-) -> Result<(), SoundfontError> {
+    reader: &mut F,
+) -> Result<(), SoundfontError>
+where
+    F: FnMut(&Path) -> Result<String, SoundfontError>,
+{
     if depth > MAX_INCLUDE_DEPTH {
         return Err(SoundfontError::Invalid(format!(
             "SFZ includes nest deeper than {MAX_INCLUDE_DEPTH} levels"
         )));
     }
     for line in source.lines() {
-        expand_line(line, base, macros, output, depth)?;
+        expand_line(line, base, macros, output, depth, reader)?;
         output.push('\n');
+        if output.len() > MAX_EXPANDED_BYTES {
+            return Err(SoundfontError::Invalid(format!(
+                "SFZ expands beyond {MAX_EXPANDED_BYTES} bytes"
+            )));
+        }
     }
     Ok(())
 }
 
-fn expand_line(
+fn expand_line<F>(
     line: &str,
     base: &Path,
     macros: &mut BTreeMap<String, String>,
     output: &mut String,
     depth: usize,
-) -> Result<(), SoundfontError> {
+    reader: &mut F,
+) -> Result<(), SoundfontError>
+where
+    F: FnMut(&Path) -> Result<String, SoundfontError>,
+{
     let line = strip_comment(line);
     let mut rest = line;
     loop {
@@ -115,11 +144,12 @@ fn expand_line(
                     SoundfontError::Invalid("#include is missing a quoted path".into())
                 })?;
                 let resolved = resolve(base, &substitute(path, macros));
-                let included = read(&resolved)?;
+                let included = reader(&resolved)?;
                 // A newline before and after keeps the included file's own line
                 // structure intact, which is what terminates a `sample=` value.
                 output.push('\n');
-                expand_into(&included, base, macros, output, depth + 1)?;
+                let included_base = resolved.parent().unwrap_or(base);
+                expand_into(&included, included_base, macros, output, depth + 1, reader)?;
                 rest = after;
             }
         }
@@ -323,6 +353,37 @@ mod tests {
         let mut macros = BTreeMap::new();
         let output = expand_text("#include \"Data\\body.txt\"", &directory, &mut macros).unwrap();
         assert!(output.contains("volume=0"), "{output}");
+    }
+
+    #[test]
+    fn virtual_nested_includes_resolve_beside_the_including_document() {
+        let files = BTreeMap::from([
+            (
+                "Maps/Parts/body.inc".to_string(),
+                "#include \"../Shared/sample.inc\"".to_string(),
+            ),
+            (
+                "Maps/Parts/../Shared/sample.inc".to_string(),
+                "sample=../Samples/C4.wav key=60".to_string(),
+            ),
+        ]);
+        let mut macros = BTreeMap::new();
+        let output = expand_text_with(
+            "#include \"Parts/body.inc\"",
+            Path::new("Maps"),
+            &mut macros,
+            |path| {
+                let path = path.to_string_lossy().replace('\\', "/");
+                files.get(&path).cloned().ok_or_else(|| {
+                    SoundfontError::Invalid(format!("missing virtual include {path:?}"))
+                })
+            },
+        )
+        .unwrap();
+        assert!(
+            output.contains("sample=../Samples/C4.wav key=60"),
+            "{output}"
+        );
     }
 
     #[test]

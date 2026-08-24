@@ -3,6 +3,23 @@
 All user-visible changes to the RF-Soundfonts plugin. Versions follow the
 plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
+## 0.6.3 — 2026-08-23
+
+### Added
+
+- CONFIG can add an `.sfz` instrument directly. RackForge packages its nested
+  include documents, WAV/FLAC samples and declared artwork into a portable
+  library resource.
+- Portable SFZ playback supports key and velocity regions, controller gates
+  and defaults, envelopes, tuning, pan, gain, loops, groups, choke groups and
+  controller-driven amplitude, pan, velocity response and release.
+
+### Safety
+
+- SFZ archive paths, include depth, expanded text, map count, sample memory and
+  package size are bounded. Missing or escaping dependencies reject the import
+  without replacing the active instrument.
+
 ## 0.6.2 — 2026-08-22
 
 ### Added

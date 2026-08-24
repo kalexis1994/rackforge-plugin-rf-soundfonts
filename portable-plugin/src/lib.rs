@@ -40,7 +40,7 @@ enum BankSource {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BankFormat {
     SoundFont,
-    Kontakt,
+    InstrumentBank,
 }
 
 impl BankSource {
@@ -60,7 +60,7 @@ type CatalogEntry = (i32, i32, String);
 struct PortableSoundfonts {
     sound_font: Option<Arc<SoundFont>>,
     synth: Option<Synthesizer>,
-    nki: Option<nki_bank::Player>,
+    instrument_bank: Option<nki_bank::Player>,
     pending: Option<PendingResource>,
     active_source: Option<BankSource>,
     active_format: Option<BankFormat>,
@@ -78,7 +78,7 @@ impl Default for PortableSoundfonts {
         Self {
             sound_font: None,
             synth: None,
-            nki: None,
+            instrument_bank: None,
             pending: None,
             active_source: None,
             active_format: None,
@@ -192,7 +192,7 @@ impl PortableSoundfonts {
     }
 
     fn rebuild_synth(&mut self) -> bool {
-        if self.active_format == Some(BankFormat::Kontakt) {
+        if self.active_format == Some(BankFormat::InstrumentBank) {
             self.synth = None;
             return true;
         }
@@ -312,7 +312,7 @@ impl Processor for PortableSoundfonts {
             return false;
         }
         self.sample_rate = sample_rate.round() as i32;
-        if let Some(player) = self.nki.as_mut() {
+        if let Some(player) = self.instrument_bank.as_mut() {
             player.set_sample_rate(self.sample_rate as u32);
             player.set_effect_controls(self.fx_controls);
         }
@@ -335,7 +335,7 @@ impl Processor for PortableSoundfonts {
                 if !self.fx_controls.set_parameter(index, value as f32) {
                     return false;
                 }
-                if let Some(player) = self.nki.as_mut() {
+                if let Some(player) = self.instrument_bank.as_mut() {
                     player.set_effect_controls(self.fx_controls);
                 }
             }
@@ -352,7 +352,7 @@ impl Processor for PortableSoundfonts {
     }
 
     fn reset(&mut self) {
-        if let Some(player) = self.nki.as_mut() {
+        if let Some(player) = self.instrument_bank.as_mut() {
             player.reset();
         }
         if let Some(synth) = self.synth.as_mut() {
@@ -416,7 +416,7 @@ impl Processor for PortableSoundfonts {
                 return false;
             };
             let selection = self
-                .nki
+                .instrument_bank
                 .as_ref()
                 .and_then(|current| current.selected_id())
                 .map(str::to_string)
@@ -430,10 +430,10 @@ impl Processor for PortableSoundfonts {
                 return false;
             }
             player.set_effect_controls(self.fx_controls);
-            self.nki = Some(player);
+            self.instrument_bank = Some(player);
             self.synth = None;
             self.active_source = Some(BankSource::User);
-            self.active_format = Some(BankFormat::Kontakt);
+            self.active_format = Some(BankFormat::InstrumentBank);
             return true;
         }
 
@@ -452,15 +452,15 @@ impl Processor for PortableSoundfonts {
             }
         }
         self.sound_font = Some(sound_font);
-        self.nki = None;
+        self.instrument_bank = None;
         self.active_source = Some(pending.source);
         self.active_format = Some(BankFormat::SoundFont);
         self.rebuild_synth()
     }
 
     fn write_preset_catalog(&mut self, destination: &mut [u8]) -> Option<usize> {
-        if self.active_format == Some(BankFormat::Kontakt) {
-            let bytes = self.nki.as_ref()?.catalog_json();
+        if self.active_format == Some(BankFormat::InstrumentBank) {
+            let bytes = self.instrument_bank.as_ref()?.catalog_json();
             if bytes.len() > destination.len() {
                 return None;
             }
@@ -476,8 +476,8 @@ impl Processor for PortableSoundfonts {
     }
 
     fn load_preset(&mut self, id: &str) -> bool {
-        if self.active_format == Some(BankFormat::Kontakt) {
-            let Some(player) = self.nki.as_mut() else {
+        if self.active_format == Some(BankFormat::InstrumentBank) {
+            let Some(player) = self.instrument_bank.as_mut() else {
                 return false;
             };
             if !player.load_preset(id) {
@@ -529,8 +529,8 @@ impl Processor for PortableSoundfonts {
         let master_volume = &mut self.master_volume;
         let fx_amount = &mut self.fx_amount;
         let fx_controls = &mut self.fx_controls;
-        if self.active_format == Some(BankFormat::Kontakt) {
-            let Some(player) = self.nki.as_mut() else {
+        if self.active_format == Some(BankFormat::InstrumentBank) {
+            let Some(player) = self.instrument_bank.as_mut() else {
                 return;
             };
             let mut midi_index = 0;

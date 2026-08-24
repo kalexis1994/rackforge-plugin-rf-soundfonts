@@ -488,7 +488,13 @@
 
   const libraryName = (grant) => {
     const name = cleanText(grant?.display_name, "RF instrument library", 120);
-    return name.replace(/\.(?:nki|sf2|rfbank)$/i, "");
+    return name.replace(/\.(?:nki|sf2|sfz|rfbank)$/i, "");
+  };
+
+  const dependencyBundle = (name) => {
+    if (/\.nki$/i.test(name || "")) return "nki_dependencies";
+    if (/\.sfz$/i.test(name || "")) return "sfz_dependencies";
+    return null;
   };
 
   const persistLibraryCatalogs = () => {
@@ -561,7 +567,7 @@
         target_resource_id: "user-soundfont",
         grant_id: grant.grant_id,
         entry_id: null,
-        bundle: /\.nki$/i.test(grant.display_name || "") ? "nki_dependencies" : null,
+        bundle: dependencyBundle(grant.display_name),
       });
       rememberActiveLibrary(grant);
       activation.responded = true;
@@ -1073,7 +1079,7 @@
         target_resource_id: "user-soundfont",
         grant_id: grant.grant_id,
         entry_id: null,
-        bundle: /\.nki$/i.test(name) ? "nki_dependencies" : null,
+        bundle: dependencyBundle(name),
       });
       installedName = name;
       rememberActiveLibrary(grant);
@@ -1094,7 +1100,7 @@
     try {
       const grant = await hostRequest("plugin.select_resource", {
         resource_id: "user-soundfont",
-        extensions: ["nki", "sf2", "rfbank"],
+        extensions: ["nki", "sf2", "sfz", "rfbank"],
       });
       if (!grant?.grant_id) throw new Error("RackForge did not return a valid file grant.");
       if (!addedLibraries.some((candidate) => candidate.grant_id === grant.grant_id)) {
