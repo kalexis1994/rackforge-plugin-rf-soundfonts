@@ -120,9 +120,11 @@ tools/                        Reproducible packaging and installation helpers
 ## Local development
 
 For adjacent checkouts named `rackforge` and
-`rackforge-plugin-rf-soundfonts`, copy `.cargo/config.toml.example` to
-`.cargo/config.toml`. This replaces the pinned Git SDK sources with the local
-RackForge API crates without changing release metadata.
+`rackforge-plugin-rf-soundfonts`, copy `.cargo/config.toml.example` to `.cargo/config.toml` in the directory
+that holds both checkouts -- not into this repository, whose own
+`.cargo/config.toml` carries the SIMD build flag every checkout needs.
+This replaces the pinned Git SDK sources with the local RackForge API crates
+without changing release metadata.
 
 ```bash
 cargo test --workspace --locked
