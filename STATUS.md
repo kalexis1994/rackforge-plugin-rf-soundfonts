@@ -51,6 +51,9 @@ layers, splits or complete performance setups.
   archive released, so selecting an instrument inside RackForge's audio
   callback decodes and allocates nothing. The bank's archive plus decoded
   samples are capped at 288 MiB, measured on the decoded 32-bit audio.
+- Portable RF banks start and end notes without allocating: the voice list is
+  reserved per instrument, filters are prepared once and held inline, and a
+  full pool fades its oldest voice rather than cutting it.
 - A user bank chosen in CONFIG is installed into private plugin storage
   (`user-soundfont`), so it survives restarts and is delivered to every new
   instance after the factory bank.

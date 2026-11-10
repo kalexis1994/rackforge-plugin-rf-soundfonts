@@ -361,6 +361,7 @@ impl DelayLine {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct StereoBiquad {
     coefficients: BiquadCoefficients,
     state: [[f32; 2]; 2],

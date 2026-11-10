@@ -45,7 +45,17 @@ const PREPARED_EFFECT_SECONDS: u64 = 4;
 /// The reserve assumes at least this rate, since the bank is usually decoded
 /// before the host prepares the component at its real one.
 const PREPARED_EFFECT_MIN_RATE: u64 = 96_000;
+/// Voices allowed to sound at once.
 const MAX_VOICES: usize = 128;
+/// Room for voices fading out after being stolen or retriggered, on top of the
+/// sounding ones. The voice list is reserved at this size when an instrument is
+/// built, so starting a note never reallocates it in the audio callback.
+const VOICE_CAPACITY: usize = MAX_VOICES * 2;
+/// A stolen voice fades over this long rather than being cut, which clicks.
+const STOLEN_VOICE_FADE_SECONDS: f32 = 0.005;
+/// Kontakt allows eight insert effects per group; filters past that are
+/// dropped so a voice can hold its filters inline.
+const MAX_VOICE_FILTERS: usize = 8;
 const MINIMUM_RELEASE_SECONDS: f32 = 0.005;
 const ARTWORK_MARKER: &str = "\u{001e}RF_ARTWORK=";
 
@@ -326,15 +336,45 @@ struct Region {
     envelope: EnvelopeSpec,
     lfo: LfoSpec,
     modulation_cc: Option<u8>,
-    filters: Vec<NkiFilter>,
+    /// Filters prepared at the instrument's sample rate; each voice starts
+    /// from a copy of them.
+    filters: VoiceFilters,
     sfz: Option<SampledRegion>,
+}
+
+/// A voice's filters, held inline and prepared when the instrument is built,
+/// so starting or ending a note touches no allocator.
+#[derive(Clone, Copy)]
+struct VoiceFilters([Option<StereoBiquad>; MAX_VOICE_FILTERS]);
+
+impl VoiceFilters {
+    const NONE: Self = Self([None; MAX_VOICE_FILTERS]);
+
+    fn new(filters: &[NkiFilter], sample_rate: u32) -> Self {
+        let mut slots = [None; MAX_VOICE_FILTERS];
+        let prepared = filters
+            .iter()
+            .filter_map(|filter| StereoBiquad::new(*filter, sample_rate));
+        for (slot, filter) in slots.iter_mut().zip(prepared) {
+            *slot = Some(filter);
+        }
+        Self(slots)
+    }
+
+    #[inline]
+    fn process(&mut self, mut frame: [f32; 2]) -> [f32; 2] {
+        for filter in self.0.iter_mut().map_while(Option::as_mut) {
+            frame = filter.process(frame);
+        }
+        frame
+    }
 }
 
 struct ActiveVoice {
     channel: usize,
     voice: Voice,
     modulation_cc: Option<u8>,
-    filters: Vec<StereoBiquad>,
+    filters: VoiceFilters,
     group: u32,
 }
 
@@ -1059,6 +1099,11 @@ impl Library {
             let Some(&wave_index) = required.get(&key) else {
                 continue;
             };
+            // Such a zone fails to start on every note, inside the audio
+            // callback, so it could never sound; it is left out here instead.
+            if zone.root_key > 127 || zone.sample_start >= waves[wave_index].frame_count() {
+                continue;
+            }
             let envelope = document
                 .groups
                 .get(zone.group)
@@ -1085,8 +1130,9 @@ impl Library {
                     .effects
                     .group_filters
                     .get(&zone.group)
-                    .cloned()
-                    .unwrap_or_default(),
+                    .map_or(VoiceFilters::NONE, |filters| {
+                        VoiceFilters::new(filters, sample_rate)
+                    }),
                 sfz: None,
             });
         }
@@ -1101,7 +1147,7 @@ impl Library {
         Ok(LoadedInstrument {
             waves,
             regions,
-            voices: Vec::new(),
+            voices: Vec::with_capacity(VOICE_CAPACITY),
             held: [[false; 128]; 16],
             sustain: [false; 16],
             pitch_bend_cents: [0.0; 16],
@@ -1153,6 +1199,9 @@ impl Library {
                 continue;
             };
             let compiled = resident_region(opcodes, wave_index, &waves[wave_index]);
+            if compiled.pitch_keycenter > 127 {
+                continue;
+            }
             let zone = NkiZone {
                 sample: reference.clone(),
                 key_low: compiled.key_low,
@@ -1173,7 +1222,7 @@ impl Library {
                 envelope: compiled.envelope,
                 lfo: LfoSpec::default(),
                 modulation_cc: None,
-                filters: Vec::new(),
+                filters: VoiceFilters::NONE,
                 sfz: Some(compiled),
             });
         }
@@ -1193,7 +1242,7 @@ impl Library {
         Ok(LoadedInstrument {
             waves,
             regions,
-            voices: Vec::new(),
+            voices: Vec::with_capacity(VOICE_CAPACITY),
             held: [[false; 128]; 16],
             sustain: [false; 16],
             pitch_bend_cents: [0.0; 16],
@@ -1444,20 +1493,36 @@ impl LoadedInstrument {
             if zone.sample_start > 0 && voice.start_at_frame(zone.sample_start).is_err() {
                 continue;
             }
+            Self::make_room(&mut self.voices);
             self.voices.push(ActiveVoice {
                 channel,
                 voice,
                 modulation_cc: region.modulation_cc,
-                filters: region
-                    .filters
-                    .iter()
-                    .filter_map(|filter| StereoBiquad::new(*filter, sample_rate))
-                    .collect(),
+                filters: region.filters,
                 group,
             });
         }
-        if self.voices.len() > MAX_VOICES {
-            self.voices.drain(0..self.voices.len() - MAX_VOICES);
+    }
+
+    /// Keeps a slot free for one more voice without growing the list.
+    ///
+    /// Past [`MAX_VOICES`] sounding voices the oldest is stolen, faded rather
+    /// than cut. Its fade still occupies a slot, which is what the headroom up
+    /// to [`VOICE_CAPACITY`] is for; only when even that is full is the oldest
+    /// voice removed outright. The list stays in start order, so the front is
+    /// always the oldest voice.
+    fn make_room(voices: &mut Vec<ActiveVoice>) {
+        let sounding = voices
+            .iter()
+            .filter(|active| !active.voice.is_fading())
+            .count();
+        if sounding >= MAX_VOICES
+            && let Some(oldest) = voices.iter_mut().find(|active| !active.voice.is_fading())
+        {
+            oldest.voice.fade_out(STOLEN_VOICE_FADE_SECONDS);
+        }
+        if voices.len() >= VOICE_CAPACITY {
+            voices.remove(0);
         }
     }
 
@@ -1534,9 +1599,7 @@ impl LoadedInstrument {
                 let mut value = active
                     .voice
                     .next_frame_modulated(self.pitch_bend_cents[channel], modulation);
-                for filter in &mut active.filters {
-                    value = filter.process(value);
-                }
+                value = active.filters.process(value);
                 mixed[0] += value[0];
                 mixed[1] += value[1];
             }
@@ -1761,6 +1824,60 @@ mod tests {
         player.render(&mut output, 2, 0, 960, 1.0, 0.0);
         player.dispatch_midi(0x80, 60, 0);
         output.iter().any(|sample| sample.abs() > 0.01)
+    }
+
+    fn instrument(player: &mut Player) -> &mut LoadedInstrument {
+        player.active().expect("an instrument is selected")
+    }
+
+    #[test]
+    fn a_full_pool_fades_its_oldest_voice_instead_of_cutting_it() {
+        let bytes = test_rf_bank(&[("tone", 48_000)]);
+        let mut player = Player::from_bytes(bytes, 48_000).unwrap();
+        assert!(player.load_preset("rf.tone"));
+        // Fill the pool with one voice per key, so none retriggers another.
+        for note in 0..MAX_VOICES as u8 {
+            player.dispatch_midi(0x90, note, 100);
+        }
+        assert!(
+            instrument(&mut player)
+                .voices
+                .iter()
+                .all(|voice| !voice.voice.is_fading())
+        );
+        player.dispatch_midi(0x91, 0, 100);
+        let voices = &instrument(&mut player).voices;
+        assert_eq!(voices.len(), MAX_VOICES + 1);
+        assert!(voices[0].voice.is_fading(), "the oldest voice is faded out");
+        assert!(voices[1..].iter().all(|voice| !voice.voice.is_fading()));
+    }
+
+    #[test]
+    fn the_voice_list_never_outgrows_its_reservation() {
+        let bytes = test_rf_bank(&[("tone", 48_000)]);
+        let mut player = Player::from_bytes(bytes, 48_000).unwrap();
+        assert!(player.load_preset("rf.tone"));
+        let reserved = instrument(&mut player).voices.capacity();
+        assert!(reserved >= VOICE_CAPACITY);
+        for round in 0..20_u8 {
+            for note in 0..128_u8 {
+                player.dispatch_midi(0x90 | (round % 16), note, 100);
+            }
+        }
+        let voices = &instrument(&mut player).voices;
+        assert!(voices.len() <= VOICE_CAPACITY);
+        assert_eq!(voices.capacity(), reserved, "the voice list reallocated");
+    }
+
+    #[test]
+    fn voice_filters_stop_at_the_inline_limit() {
+        let filter = NkiFilter::LowPass2 {
+            cutoff: 0.5,
+            resonance: 0.0,
+        };
+        let filters = VoiceFilters::new(&[filter; MAX_VOICE_FILTERS + 3], 48_000);
+        assert!(filters.0.iter().all(Option::is_some));
+        assert!(VoiceFilters::NONE.0.iter().all(Option::is_none));
     }
 
     #[test]

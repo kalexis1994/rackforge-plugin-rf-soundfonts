@@ -18,6 +18,14 @@ plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
   archive plus its decoded samples now stays within 288 MiB.
 - Delivering a user bank releases the 113 MB factory SoundFont, which used to
   stay resident behind it.
+- Starting a note in an RF, Kontakt or SFZ bank no longer allocates in the
+  audio callback. The voice list is reserved when the instrument is built, and
+  each voice's filters are prepared once per instrument and held inline.
+- Past 128 sounding voices the oldest is faded out over 5 ms instead of being
+  cut, which clicked.
+- Zones whose root key or sample start can never play are dropped when the
+  instrument loads, instead of failing, and allocating an error message, on
+  every note.
 - Volume, FX amount and the nine effect parameters are saved with RackForge
   presets and sessions; they used to reset on every reload. Presets saved by
   earlier versions still load, with default parameter values.
