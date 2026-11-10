@@ -1,9 +1,12 @@
 //! Self-contained RF instrument banks for the portable processor.
 //!
-//! An RF bank retains its instrument maps and referenced audio, while decoding
-//! only the samples needed by the selected instrument. That keeps a whole
-//! library installable as one RackForge resource without decoding every
-//! instrument into WebAssembly memory at startup.
+//! An RF bank keeps its instrument maps and referenced audio in one RackForge
+//! resource. When the whole bank fits in memory, every sample is decoded while
+//! the resource is delivered, on the host's control thread, and the archive is
+//! released: selecting an instrument afterwards decodes and allocates nothing.
+//! That matters because RackForge selects sounds from inside its audio
+//! callback, where decoding a sample library is a guaranteed dropout. A bank
+//! too large to hold whole decodes only its selected instrument instead.
 
 use base64::Engine;
 use image::codecs::jpeg::JpegEncoder;
@@ -17,7 +20,7 @@ use rf_soundfonts::{
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 use zip::ZipArchive;
@@ -29,7 +32,19 @@ const MAX_MAP_BYTES: u64 = 2 * 1_048_576;
 const MAX_EXPANDED_SFZ_BYTES: usize = 16 * 1_048_576;
 const MAX_SFZ_REGIONS: usize = 8_192;
 const MAX_ARTWORK_BYTES: u64 = 4 * 1_048_576;
-const MAX_SELECTED_SAMPLE_BYTES: u64 = 160 * 1_048_576;
+/// Ceiling for what one RF bank keeps resident: the archive while it is still
+/// held plus every decoded sample. It is measured on the decoded audio, 32-bit
+/// float, so a 16-bit WAV doubles and FLAC grows about fourfold; never on the
+/// file. The rest of the component's 384 MiB holds code, effect buffers and
+/// the transient copy of the entry being decoded. CONFIG's Builder mirrors
+/// this figure; change both together.
+const MAX_RESIDENT_SAMPLE_BYTES: u64 = 288 * 1_048_576;
+/// Effect memory reserved per prepared instrument: four seconds of stereo
+/// float, covering its two-second delay and the reverb's pre-delay and tank.
+const PREPARED_EFFECT_SECONDS: u64 = 4;
+/// The reserve assumes at least this rate, since the bank is usually decoded
+/// before the host prepares the component at its real one.
+const PREPARED_EFFECT_MIN_RATE: u64 = 96_000;
 const MAX_VOICES: usize = 128;
 const MINIMUM_RELEASE_SECONDS: f32 = 0.005;
 const ARTWORK_MARKER: &str = "\u{001e}RF_ARTWORK=";
@@ -289,6 +304,20 @@ pub struct Library {
     samples: BTreeMap<String, SampleEntry>,
     /// Full, case-folded archive paths used by SFZ.
     sample_paths: BTreeMap<String, SampleEntry>,
+    /// Samples decoded ahead, keyed by archive entry so a sample shared
+    /// between instruments is held once. Filled only when the whole bank fits;
+    /// the archive is released at the same moment.
+    decoded: BTreeMap<usize, Wave>,
+    /// Normally [`MAX_RESIDENT_SAMPLE_BYTES`]; tests lower it.
+    resident_limit: u64,
+}
+
+/// Why one sample could not be produced.
+enum SampleError {
+    /// Decoding it would exceed the bank's allowance for decoded audio.
+    TooLarge,
+    /// It is missing, unreadable or not valid audio.
+    Failed(String),
 }
 
 struct Region {
@@ -325,8 +354,12 @@ struct LoadedInstrument {
 
 pub struct Player {
     library: Library,
+    /// Every instrument, built ahead and indexed like the library, when the
+    /// bank was preloaded. Empty when it decodes one instrument at a time.
+    prepared: Vec<Option<LoadedInstrument>>,
+    /// The selected instrument when decoding on demand.
     loaded: Option<LoadedInstrument>,
-    selected_id: Option<String>,
+    selected: Option<usize>,
     sample_rate: u32,
 }
 
@@ -391,8 +424,8 @@ fn slug(value: &str) -> String {
     }
 }
 
-fn read_entry(
-    archive: &mut ZipArchive<Cursor<&[u8]>>,
+fn read_entry<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     index: usize,
     limit: u64,
 ) -> Result<Vec<u8>, String> {
@@ -536,6 +569,57 @@ fn artwork_data_url(bytes: &[u8], name: &str) -> Result<String, String> {
         "data:image/jpeg;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(jpeg)
     ))
+}
+
+fn decoded_size(wave: &Wave) -> u64 {
+    (wave.samples.len() * size_of::<f32>()) as u64
+}
+
+/// Effect memory one prepared instrument may need at `sample_rate`.
+fn prepared_effect_bytes(sample_rate: u32) -> u64 {
+    u64::from(sample_rate).max(PREPARED_EFFECT_MIN_RATE)
+        * 2
+        * size_of::<f32>() as u64
+        * PREPARED_EFFECT_SECONDS
+}
+
+/// Decodes one archive entry into at most `allowance` bytes of audio.
+///
+/// The limit reaches the decoder itself, which checks the sample's declared
+/// length before allocating for it, so an entry that does not fit is refused
+/// without first being expanded into memory.
+fn decode_entry(
+    bytes: &Arc<[u8]>,
+    archive: &mut Option<ZipArchive<Cursor<Arc<[u8]>>>>,
+    key: &str,
+    entry: SampleEntry,
+    allowance: u64,
+) -> Result<Wave, SampleError> {
+    if archive.is_none() {
+        if bytes.is_empty() {
+            return Err(SampleError::Failed(format!(
+                "sample {key:?} is not resident"
+            )));
+        }
+        let opened = ZipArchive::new(Cursor::new(Arc::clone(bytes)))
+            .map_err(|error| SampleError::Failed(format!("cannot reopen RF bank: {error}")))?;
+        *archive = Some(opened);
+    }
+    let Some(archive) = archive.as_mut() else {
+        return Err(SampleError::Failed("cannot reopen RF bank".into()));
+    };
+    let raw = read_entry(archive, entry.archive_index, entry.expanded_bytes)
+        .map_err(SampleError::Failed)?;
+    let max_samples = usize::try_from(allowance / size_of::<f32>() as u64).unwrap_or(usize::MAX);
+    let decoded = if extension(key).eq_ignore_ascii_case("flac") {
+        rf_soundfonts::flac::decode_limited(&raw, key.to_string(), max_samples)
+    } else {
+        rf_soundfonts::wav::decode_limited(&raw, key.to_string(), max_samples)
+    };
+    decoded.map_err(|error| match error {
+        rf_soundfonts::SoundfontError::TooLarge { .. } => SampleError::TooLarge,
+        other => SampleError::Failed(format!("cannot decode sample {key:?}: {other}")),
+    })
 }
 
 impl Library {
@@ -818,15 +902,119 @@ impl Library {
             instruments,
             samples,
             sample_paths,
+            decoded: BTreeMap::new(),
+            resident_limit: MAX_RESIDENT_SAMPLE_BYTES,
         })
     }
 
-    fn load(&self, id: &str, sample_rate: u32) -> Result<LoadedInstrument, String> {
+    /// Decoded audio still allowed beside the archive.
+    fn decode_allowance(&self) -> u64 {
+        self.resident_limit.saturating_sub(self.bytes.len() as u64)
+    }
+
+    /// The samples one instrument needs, in order: from the resident cache
+    /// when the bank was preloaded, otherwise decoded within the allowance.
+    fn waves_for<'a>(
+        &self,
+        instrument_name: &str,
+        samples: impl Iterator<Item = (&'a str, SampleEntry)>,
+    ) -> Result<Vec<Wave>, String> {
+        let mut archive = None;
+        let mut allowance = self.decode_allowance();
+        let mut waves = Vec::new();
+        for (key, entry) in samples {
+            if let Some(wave) = self.decoded.get(&entry.archive_index) {
+                waves.push(wave.clone());
+                continue;
+            }
+            match decode_entry(&self.bytes, &mut archive, key, entry, allowance) {
+                Ok(wave) => {
+                    allowance = allowance.saturating_sub(decoded_size(&wave));
+                    waves.push(wave);
+                }
+                Err(SampleError::TooLarge) => {
+                    return Err(format!(
+                        "instrument {instrument_name:?} needs too much decoded sample data"
+                    ));
+                }
+                Err(SampleError::Failed(message)) => return Err(message),
+            }
+        }
+        Ok(waves)
+    }
+
+    /// Every distinct sample the bank's instruments reference, keyed by
+    /// archive entry.
+    fn referenced_samples(&self) -> BTreeMap<usize, (String, SampleEntry)> {
+        let mut referenced = BTreeMap::new();
+        for instrument in &self.instruments {
+            match &instrument.map {
+                InstrumentMap::Mapped(document) => {
+                    for zone in &document.zones {
+                        let key = zone.sample.to_ascii_lowercase();
+                        if let Some(entry) = self.samples.get(&key) {
+                            referenced
+                                .entry(entry.archive_index)
+                                .or_insert((key, *entry));
+                        }
+                    }
+                }
+                InstrumentMap::Sfz(sfz) => {
+                    for path in sfz.sample_paths.values() {
+                        if let Some(entry) = self.sample_paths.get(path) {
+                            referenced
+                                .entry(entry.archive_index)
+                                .or_insert_with(|| (path.clone(), *entry));
+                        }
+                    }
+                }
+            }
+        }
+        referenced
+    }
+
+    /// Decodes every referenced sample when the whole bank fits beside its
+    /// archive and `reserve` bytes of effect memory, then releases the
+    /// archive. Returns false, keeping nothing decoded, when it does not fit.
+    fn preload(&mut self, reserve: u64) -> bool {
+        let mut allowance = self.decode_allowance().saturating_sub(reserve);
+        let mut archive = None;
+        let mut decoded = BTreeMap::new();
+        for (index, (key, entry)) in self.referenced_samples() {
+            match decode_entry(&self.bytes, &mut archive, &key, entry, allowance) {
+                Ok(wave) => {
+                    allowance = allowance.saturating_sub(decoded_size(&wave));
+                    decoded.insert(index, wave);
+                }
+                Err(SampleError::TooLarge) => return false,
+                // A broken sample breaks only the instruments that use it, as
+                // it would when decoded on demand.
+                Err(SampleError::Failed(_)) => {}
+            }
+        }
+        self.decoded = decoded;
+        self.bytes = Arc::from(Vec::new());
+        true
+    }
+
+    fn index_of(&self, id: &str) -> Option<usize> {
+        self.instruments
+            .iter()
+            .position(|instrument| instrument.id == id)
+    }
+
+    /// Builds every instrument from the resident samples.
+    fn build_all(&self, sample_rate: u32) -> Vec<Option<LoadedInstrument>> {
+        (0..self.instruments.len())
+            .map(|index| self.load_index(index, sample_rate).ok())
+            .collect()
+    }
+
+    fn load_index(&self, index: usize, sample_rate: u32) -> Result<LoadedInstrument, String> {
         let instrument = self
             .instruments
-            .iter()
-            .find(|instrument| instrument.id == id)
-            .ok_or_else(|| format!("unknown RF instrument {id:?}"))?;
+            .get(index)
+            .ok_or_else(|| format!("unknown RF instrument {index}"))?;
         match &instrument.map {
             InstrumentMap::Mapped(document) => {
                 self.load_mapped(&instrument.name, document, sample_rate)
@@ -843,24 +1031,13 @@ impl Library {
     ) -> Result<LoadedInstrument, String> {
         let mut required = BTreeMap::<String, usize>::new();
         let mut sample_keys = Vec::new();
-        let mut expanded_bytes = 0_u64;
         for zone in &document.zones {
             let key = zone.sample.to_ascii_lowercase();
-            let Some(entry) = self.samples.get(&key) else {
+            if !self.samples.contains_key(&key) || required.contains_key(&key) {
                 continue;
-            };
-            if !required.contains_key(&key) {
-                expanded_bytes = expanded_bytes.saturating_add(entry.expanded_bytes);
-                if expanded_bytes > MAX_SELECTED_SAMPLE_BYTES {
-                    return Err(format!(
-                        "instrument {:?} needs too much decoded sample data",
-                        instrument_name
-                    ));
-                }
-                let wave_index = sample_keys.len();
-                required.insert(key.clone(), wave_index);
-                sample_keys.push(key);
             }
+            required.insert(key.clone(), sample_keys.len());
+            sample_keys.push(key);
         }
         if sample_keys.is_empty() {
             return Err(format!(
@@ -869,20 +1046,12 @@ impl Library {
             ));
         }
 
-        let mut archive = ZipArchive::new(Cursor::new(self.bytes.as_ref()))
-            .map_err(|error| format!("cannot reopen RF bank: {error}"))?;
-        let mut waves = Vec::with_capacity(sample_keys.len());
-        for key in &sample_keys {
-            let entry = self.samples[key];
-            let bytes = read_entry(&mut archive, entry.archive_index, entry.expanded_bytes)?;
-            let wave = if extension(key).eq_ignore_ascii_case("flac") {
-                rf_soundfonts::flac::decode(&bytes, key.clone())
-            } else {
-                rf_soundfonts::wav::decode(&bytes, key.clone())
-            }
-            .map_err(|error| format!("cannot decode sample {key:?}: {error}"))?;
-            waves.push(wave);
-        }
+        let waves = self.waves_for(
+            instrument_name,
+            sample_keys
+                .iter()
+                .map(|key| (key.as_str(), self.samples[key])),
+        )?;
 
         let mut regions = Vec::new();
         for zone in &document.zones {
@@ -952,21 +1121,12 @@ impl Library {
     ) -> Result<LoadedInstrument, String> {
         let mut required = BTreeMap::<String, usize>::new();
         let mut sample_keys = Vec::new();
-        let mut expanded_bytes = 0_u64;
         for path in sfz.sample_paths.values() {
-            let Some(entry) = self.sample_paths.get(path) else {
+            if !self.sample_paths.contains_key(path) || required.contains_key(path) {
                 continue;
-            };
-            if !required.contains_key(path) {
-                expanded_bytes = expanded_bytes.saturating_add(entry.expanded_bytes);
-                if expanded_bytes > MAX_SELECTED_SAMPLE_BYTES {
-                    return Err(format!(
-                        "SFZ instrument {instrument_name:?} needs too much decoded sample data"
-                    ));
-                }
-                required.insert(path.clone(), sample_keys.len());
-                sample_keys.push(path.clone());
             }
+            required.insert(path.clone(), sample_keys.len());
+            sample_keys.push(path.clone());
         }
         if sample_keys.is_empty() {
             return Err(format!(
@@ -974,20 +1134,12 @@ impl Library {
             ));
         }
 
-        let mut archive = ZipArchive::new(Cursor::new(self.bytes.as_ref()))
-            .map_err(|error| format!("cannot reopen RF bank: {error}"))?;
-        let mut waves = Vec::with_capacity(sample_keys.len());
-        for key in &sample_keys {
-            let entry = self.sample_paths[key];
-            let bytes = read_entry(&mut archive, entry.archive_index, entry.expanded_bytes)?;
-            let wave = if extension(key).eq_ignore_ascii_case("flac") {
-                rf_soundfonts::flac::decode(&bytes, key.clone())
-            } else {
-                rf_soundfonts::wav::decode(&bytes, key.clone())
-            }
-            .map_err(|error| format!("cannot decode SFZ sample {key:?}: {error}"))?;
-            waves.push(wave);
-        }
+        let waves = self.waves_for(
+            instrument_name,
+            sample_keys
+                .iter()
+                .map(|key| (key.as_str(), self.sample_paths[key])),
+        )?;
 
         let mut regions = Vec::new();
         for opcodes in &sfz.document.regions {
@@ -1407,10 +1559,28 @@ fn valid_loop(sample_loop: SampleLoop, frames: usize) -> bool {
 
 impl Player {
     pub fn from_bytes(bytes: Vec<u8>, sample_rate: u32) -> Result<Self, String> {
+        Self::with_resident_limit(bytes, sample_rate, MAX_RESIDENT_SAMPLE_BYTES)
+    }
+
+    fn with_resident_limit(
+        bytes: Vec<u8>,
+        sample_rate: u32,
+        resident_limit: u64,
+    ) -> Result<Self, String> {
+        let mut library = Library::parse(bytes)?;
+        library.resident_limit = resident_limit;
+        let reserve =
+            (library.instruments.len() as u64).saturating_mul(prepared_effect_bytes(sample_rate));
+        let prepared = if library.preload(reserve) {
+            library.build_all(sample_rate)
+        } else {
+            Vec::new()
+        };
         Ok(Self {
-            library: Library::parse(bytes)?,
+            library,
+            prepared,
             loaded: None,
-            selected_id: None,
+            selected: None,
             sample_rate,
         })
     }
@@ -1420,7 +1590,21 @@ impl Player {
     }
 
     pub fn selected_id(&self) -> Option<&str> {
-        self.selected_id.as_deref()
+        self.selected
+            .map(|index| self.library.instruments[index].id.as_str())
+    }
+
+    /// Whether every instrument is resident, so selecting one costs nothing.
+    pub fn is_preloaded(&self) -> bool {
+        !self.prepared.is_empty()
+    }
+
+    fn active(&mut self) -> Option<&mut LoadedInstrument> {
+        if self.prepared.is_empty() {
+            self.loaded.as_mut()
+        } else {
+            self.prepared.get_mut(self.selected?)?.as_mut()
+        }
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: u32) {
@@ -1428,32 +1612,58 @@ impl Player {
             return;
         }
         self.sample_rate = sample_rate;
+        if self.is_preloaded() {
+            // The samples stay resident; only rate-dependent state rebuilds.
+            self.prepared = self.library.build_all(sample_rate);
+            return;
+        }
         self.loaded = self
-            .selected_id
-            .as_deref()
-            .and_then(|id| self.library.load(id, sample_rate).ok());
+            .selected
+            .and_then(|index| self.library.load_index(index, sample_rate).ok());
     }
 
     pub fn load_preset(&mut self, id: &str) -> bool {
-        match self.library.load(id, self.sample_rate) {
-            Ok(loaded) => {
-                self.loaded = Some(loaded);
-                self.selected_id = Some(id.to_string());
+        let Some(index) = self.library.index_of(id) else {
+            return false;
+        };
+        if self.is_preloaded() {
+            // RackForge selects sounds from inside its audio callback, so a
+            // resident bank switches without decoding or allocating anything.
+            let Some(instrument) = self.prepared[index].as_mut() else {
+                return false;
+            };
+            instrument.reset();
+            self.selected = Some(index);
+            return true;
+        }
+        // On demand: release the current instrument first, so the two never
+        // share the allowance, and bring it back if the new one cannot load.
+        self.loaded = None;
+        match self.library.load_index(index, self.sample_rate) {
+            Ok(instrument) => {
+                self.loaded = Some(instrument);
+                self.selected = Some(index);
                 true
             }
-            Err(_) => false,
+            Err(_) => {
+                let sample_rate = self.sample_rate;
+                self.loaded = self
+                    .selected
+                    .and_then(|previous| self.library.load_index(previous, sample_rate).ok());
+                false
+            }
         }
     }
 
     pub fn reset(&mut self) {
-        if let Some(loaded) = self.loaded.as_mut() {
-            loaded.reset();
+        if let Some(instrument) = self.active() {
+            instrument.reset();
         }
     }
 
     pub fn set_effect_controls(&mut self, controls: EffectControls) {
-        if let Some(loaded) = self.loaded.as_mut() {
-            loaded.effects.set_controls(controls);
+        if let Some(instrument) = self.active() {
+            instrument.effects.set_controls(controls);
         }
     }
 
@@ -1462,8 +1672,9 @@ impl Player {
     }
 
     pub fn dispatch_midi(&mut self, status: u8, first: u8, second: u8) {
-        if let Some(loaded) = self.loaded.as_mut() {
-            loaded.dispatch_midi(status, first, second, self.sample_rate);
+        let sample_rate = self.sample_rate;
+        if let Some(instrument) = self.active() {
+            instrument.dispatch_midi(status, first, second, sample_rate);
         }
     }
 
@@ -1476,16 +1687,175 @@ impl Player {
         gain: f32,
         fx_amount: f32,
     ) {
-        if let Some(loaded) = self.loaded.as_mut() {
-            loaded.render(output, channels, start, end, gain, fx_amount);
+        if let Some(instrument) = self.active() {
+            instrument.render(output, channels, start, end, gain, fx_amount);
         }
     }
+}
+
+/// A sine tone as a 16-bit mono WAV of `frames` frames.
+#[cfg(test)]
+pub(crate) fn test_tone(frames: u32) -> Vec<u8> {
+    let data_bytes = frames * 2;
+    let mut wave = Vec::new();
+    wave.extend_from_slice(b"RIFF");
+    wave.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    wave.extend_from_slice(b"WAVEfmt ");
+    wave.extend_from_slice(&16_u32.to_le_bytes());
+    wave.extend_from_slice(&1_u16.to_le_bytes());
+    wave.extend_from_slice(&1_u16.to_le_bytes());
+    wave.extend_from_slice(&48_000_u32.to_le_bytes());
+    wave.extend_from_slice(&96_000_u32.to_le_bytes());
+    wave.extend_from_slice(&2_u16.to_le_bytes());
+    wave.extend_from_slice(&16_u16.to_le_bytes());
+    wave.extend_from_slice(b"data");
+    wave.extend_from_slice(&data_bytes.to_le_bytes());
+    for frame in 0..frames {
+        let sample =
+            ((frame as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 12_000.0) as i16;
+        wave.extend_from_slice(&sample.to_le_bytes());
+    }
+    wave
+}
+
+/// An RF bank of native instruments, each `(id, frames)` playing its own tone
+/// across the whole keyboard. Catalog ids are `rf.<id>`.
+#[cfg(test)]
+pub(crate) fn test_rf_bank(instruments: &[(&str, u32)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("bank.json", options).unwrap();
+    archive
+        .write_all(br#"{"schema_version":1,"id":"fixture","name":"Fixture"}"#)
+        .unwrap();
+    for (id, frames) in instruments {
+        archive
+            .start_file(format!("instruments/{id}.rfinstrument"), options)
+            .unwrap();
+        let map = format!(
+            r#"{{"schema_version":1,"id":"{id}","name":"{id}",
+               "envelope":{{"attack_seconds":0.0,"decay_seconds":0.1,
+                            "sustain_level":1.0,"release_seconds":0.1}},
+               "zones":[{{"name":"all","key_low":0,"key_high":127,"root_key":60,
+                          "layers":[{{"sample":"{id}.wav","velocity_low":1,"velocity_high":127}}]}}]}}"#
+        );
+        archive.write_all(map.as_bytes()).unwrap();
+        archive
+            .start_file(format!("samples/{id}.wav"), options)
+            .unwrap();
+        archive.write_all(&test_tone(*frames)).unwrap();
+    }
+    archive.finish().unwrap().into_inner()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Plays middle C through `player` and reports whether it sounded.
+    fn sounds(player: &mut Player) -> bool {
+        player.dispatch_midi(0x90, 60, 100);
+        let mut output = vec![0.0; 960 * 2];
+        player.render(&mut output, 2, 0, 960, 1.0, 0.0);
+        player.dispatch_midi(0x80, 60, 0);
+        output.iter().any(|sample| sample.abs() > 0.01)
+    }
+
+    #[test]
+    fn a_bank_that_fits_is_preloaded_and_switches_without_its_archive() {
+        let bytes = test_rf_bank(&[("left", 960), ("right", 960)]);
+        let mut player = Player::from_bytes(bytes, 48_000).unwrap();
+        assert!(player.is_preloaded());
+        // The archive is gone, so a switch that tried to decode would fail.
+        assert!(player.library.bytes.is_empty());
+        for id in ["rf.left", "rf.right", "rf.left"] {
+            assert!(player.load_preset(id), "{id}");
+            assert_eq!(player.selected_id(), Some(id));
+            assert!(sounds(&mut player), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_sample_shared_between_instruments_is_decoded_once() {
+        let mut bytes = test_rf_bank(&[("left", 960)]);
+        // A second map pointing at the first instrument's sample.
+        let mut archive = zip::ZipWriter::new_append(Cursor::new(&mut bytes)).unwrap();
+        archive
+            .start_file(
+                "instruments/twin.rfinstrument",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive
+            .write_all(
+                br#"{"schema_version":1,"id":"twin","name":"twin",
+                    "envelope":{"attack_seconds":0.0,"decay_seconds":0.1,
+                                "sustain_level":1.0,"release_seconds":0.1},
+                    "zones":[{"name":"all","key_low":0,"key_high":127,"root_key":60,
+                              "layers":[{"sample":"left.wav","velocity_low":1,"velocity_high":127}]}]}"#,
+            )
+            .unwrap();
+        archive.finish().unwrap();
+        let mut player = Player::from_bytes(bytes, 48_000).unwrap();
+        assert!(player.is_preloaded());
+        assert_eq!(player.library.decoded.len(), 1);
+        assert!(player.load_preset("rf.twin"));
+        assert!(sounds(&mut player));
+    }
+
+    #[test]
+    fn a_bank_too_large_to_preload_decodes_on_demand() {
+        let bytes = test_rf_bank(&[("left", 960), ("right", 960)]);
+        // Room for one instrument's audio beside the archive, never for both
+        // plus their effect reserve.
+        let limit = bytes.len() as u64 + 960 * 4 + 64;
+        let mut player = Player::with_resident_limit(bytes, 48_000, limit).unwrap();
+        assert!(!player.is_preloaded());
+        assert!(player.load_preset("rf.left"));
+        assert!(sounds(&mut player));
+        assert!(player.load_preset("rf.right"));
+        assert_eq!(player.selected_id(), Some("rf.right"));
+        assert!(sounds(&mut player));
+    }
+
+    #[test]
+    fn the_allowance_counts_decoded_audio_not_the_file() {
+        let frames = 4_000_u32;
+        let bytes = test_rf_bank(&[("tone", frames)]);
+        // The 16-bit file needs two bytes a sample but decodes to four. An
+        // allowance between the two must refuse it; measuring the file, as
+        // the limit once did, let it through.
+        let limit = bytes.len() as u64 + u64::from(frames) * 3;
+        let mut player = Player::with_resident_limit(bytes, 48_000, limit).unwrap();
+        assert!(!player.is_preloaded());
+        assert!(!player.load_preset("rf.tone"));
+        let error = player.library.load_index(0, 48_000).err().unwrap();
+        assert!(error.contains("too much decoded sample data"), "{error}");
+    }
+
+    #[test]
+    fn a_failed_switch_keeps_the_previous_instrument() {
+        let bytes = test_rf_bank(&[("small", 960), ("large", 48_000)]);
+        let limit = bytes.len() as u64 + 960 * 4 + 64;
+        let mut player = Player::with_resident_limit(bytes, 48_000, limit).unwrap();
+        assert!(player.load_preset("rf.small"));
+        assert!(!player.load_preset("rf.large"));
+        assert_eq!(player.selected_id(), Some("rf.small"));
+        assert!(sounds(&mut player));
+    }
+
+    #[test]
+    fn a_new_sample_rate_rebuilds_a_preloaded_bank_from_resident_audio() {
+        let bytes = test_rf_bank(&[("left", 960), ("right", 960)]);
+        let mut player = Player::from_bytes(bytes, 48_000).unwrap();
+        assert!(player.load_preset("rf.right"));
+        player.set_sample_rate(44_100);
+        assert!(player.is_preloaded());
+        assert_eq!(player.selected_id(), Some("rf.right"));
+        assert!(sounds(&mut player));
+    }
 
     fn test_wave() -> Vec<u8> {
         let mut wave = Vec::new();

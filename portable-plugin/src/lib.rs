@@ -22,6 +22,16 @@ const DEFAULT_FX_AMOUNT: f64 = 1.0;
 /// catalog always has a chance to fit the transfer buffer.
 const MAX_CATALOG_PRESETS: usize = 1536;
 const MIDI_CHANNELS: i32 = 16;
+/// Saved state: magic, layout version, parameter count, then each parameter
+/// as its index and value, little-endian. It is written straight into the
+/// host's transfer buffer so saving allocates nothing, since RackForge may ask
+/// for it from its audio thread.
+const STATE_MAGIC: &[u8; 4] = b"RFSF";
+const STATE_LAYOUT: u16 = 1;
+const STATE_HEADER_BYTES: usize = 8;
+const STATE_ENTRY_BYTES: usize = 12;
+/// Parameters 0 through 10: volume, FX amount and the nine effect controls.
+const PARAMETER_COUNT: u32 = 11;
 const PERCUSSION_CHANNEL: i32 = 9;
 const DRUM_BANK_OFFSET: i32 = 128;
 
@@ -29,6 +39,9 @@ struct PendingResource {
     source: BankSource,
     expected_bytes: usize,
     bytes: Vec<u8>,
+    /// The instrument selected in the bank this delivery supersedes, so the
+    /// replacement can keep playing it when it offers the same one.
+    previous_selection: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +69,32 @@ impl BankSource {
 
 /// One playable SoundFont preset: bank number, patch number, display name.
 type CatalogEntry = (i32, i32, String);
+
+/// Reads a saved state, validating all of it before any value is applied.
+/// Indices this build does not know, written by a newer one, are skipped.
+fn parse_state(state: &[u8]) -> Option<[Option<f64>; PARAMETER_COUNT as usize]> {
+    let header = state.get(..STATE_HEADER_BYTES)?;
+    if &header[..4] != STATE_MAGIC || u16::from_le_bytes([header[4], header[5]]) != STATE_LAYOUT {
+        return None;
+    }
+    let count = usize::from(u16::from_le_bytes([header[6], header[7]]));
+    let body = &state[STATE_HEADER_BYTES..];
+    if body.len() != count * STATE_ENTRY_BYTES {
+        return None;
+    }
+    let mut values = [None; PARAMETER_COUNT as usize];
+    for entry in body.chunks_exact(STATE_ENTRY_BYTES) {
+        let index = u32::from_le_bytes(entry[..4].try_into().ok()?);
+        let value = f64::from_le_bytes(entry[4..].try_into().ok()?);
+        if !value.is_finite() {
+            return None;
+        }
+        if let Some(slot) = values.get_mut(index as usize) {
+            *slot = Some(value);
+        }
+    }
+    Some(values)
+}
 
 struct PortableSoundfonts {
     sound_font: Option<Arc<SoundFont>>,
@@ -175,6 +214,13 @@ fn fit_catalog(
 }
 
 impl PortableSoundfonts {
+    /// Drops every loaded bank and the synthesizer built on one.
+    fn release_banks(&mut self) {
+        self.instrument_bank = None;
+        self.sound_font = None;
+        self.synth = None;
+    }
+
     fn catalog_entries(sound_font: &SoundFont) -> Vec<CatalogEntry> {
         normalize_entries(
             sound_font
@@ -351,6 +397,38 @@ impl Processor for PortableSoundfonts {
         }
     }
 
+    fn save_state(&self, destination: &mut [u8]) -> Option<usize> {
+        let length = STATE_HEADER_BYTES + PARAMETER_COUNT as usize * STATE_ENTRY_BYTES;
+        let state = destination.get_mut(..length)?;
+        state[..4].copy_from_slice(STATE_MAGIC);
+        state[4..6].copy_from_slice(&STATE_LAYOUT.to_le_bytes());
+        state[6..8].copy_from_slice(&(PARAMETER_COUNT as u16).to_le_bytes());
+        for (index, entry) in (0..PARAMETER_COUNT)
+            .zip(state[STATE_HEADER_BYTES..].chunks_exact_mut(STATE_ENTRY_BYTES))
+        {
+            entry[..4].copy_from_slice(&index.to_le_bytes());
+            entry[4..].copy_from_slice(&self.get_parameter(index)?.to_le_bytes());
+        }
+        Some(length)
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> bool {
+        // Sessions and presets saved before parameters were stored carry an
+        // empty state; they restore to the defaults every instance starts with.
+        if state.is_empty() {
+            return true;
+        }
+        let Some(values) = parse_state(state) else {
+            return false;
+        };
+        for (index, value) in (0..PARAMETER_COUNT).zip(values) {
+            if let Some(value) = value {
+                self.set_parameter(index, value);
+            }
+        }
+        true
+    }
+
     fn reset(&mut self) {
         if let Some(player) = self.instrument_bank.as_mut() {
             player.reset();
@@ -374,6 +452,20 @@ impl Processor for PortableSoundfonts {
         if expected_bytes == 0 || expected_bytes > MAX_BANK_BYTES || self.pending.is_some() {
             return false;
         }
+        let previous_selection = self
+            .instrument_bank
+            .as_ref()
+            .and_then(|bank| bank.selected_id())
+            .map(str::to_string);
+        if source == BankSource::User {
+            // A user bank supersedes everything this instance holds, so it is
+            // released before the new bank's bytes are reserved: holding the
+            // 113 MB factory SoundFont beside a user bank is what pushed real
+            // libraries past the component's memory. Nothing released here has
+            // to survive a failed delivery, because RackForge discards the
+            // whole instance when one fails.
+            self.release_banks();
+        }
         let mut bytes = Vec::new();
         if bytes.try_reserve_exact(expected_bytes).is_err() {
             return false;
@@ -382,6 +474,7 @@ impl Processor for PortableSoundfonts {
             source,
             expected_bytes,
             bytes,
+            previous_selection,
         });
         true
     }
@@ -415,11 +508,8 @@ impl Processor for PortableSoundfonts {
             else {
                 return false;
             };
-            let selection = self
-                .instrument_bank
-                .as_ref()
-                .and_then(|current| current.selected_id())
-                .map(str::to_string)
+            let selection = pending
+                .previous_selection
                 .filter(|id| player.load_preset(id))
                 .unwrap_or_else(|| {
                     let id = player.first_id().to_string();
@@ -904,6 +994,155 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    fn deliver(plugin: &mut PortableSoundfonts, id: &str, bytes: &[u8]) -> bool {
+        if !plugin.begin_resource(id, bytes.len() as u64) {
+            return false;
+        }
+        for (index, chunk) in bytes.chunks(64 * 1024).enumerate() {
+            if !plugin.write_resource((index * 64 * 1024) as u64, chunk) {
+                return false;
+            }
+        }
+        plugin.end_resource()
+    }
+
+    #[test]
+    fn state_round_trips_every_parameter() {
+        let mut plugin = PortableSoundfonts::default();
+        let values = [
+            (0, 0.4),
+            (1, 0.6),
+            (2, 1.2),
+            (3, 2.5),
+            (4, 0.5),
+            (5, -0.2),
+            (6, 0.8),
+            (7, 3.0),
+            (8, -0.3),
+            (9, 0.25),
+            (10, 1.1),
+        ];
+        for (index, value) in values {
+            assert!(plugin.set_parameter(index, value), "{index}");
+        }
+        let mut buffer = vec![0_u8; MAX_TRANSFER_BYTES];
+        let length = plugin.save_state(&mut buffer).unwrap();
+
+        let mut restored = PortableSoundfonts::default();
+        assert!(restored.load_state(&buffer[..length]));
+        for index in 0..PARAMETER_COUNT {
+            assert_eq!(
+                restored.get_parameter(index),
+                plugin.get_parameter(index),
+                "parameter {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_state_restores_the_defaults() {
+        // What every preset and session saved before 0.6.4 carries.
+        let mut plugin = PortableSoundfonts::default();
+        assert!(plugin.load_state(&[]));
+        assert_eq!(plugin.get_parameter(0), Some(DEFAULT_MASTER_VOLUME));
+        assert_eq!(plugin.get_parameter(1), Some(DEFAULT_FX_AMOUNT));
+    }
+
+    #[test]
+    fn a_malformed_state_changes_nothing() {
+        let mut source = PortableSoundfonts::default();
+        assert!(source.set_parameter(0, 0.3));
+        let mut buffer = vec![0_u8; 512];
+        let length = source.save_state(&mut buffer).unwrap();
+        let good = buffer[..length].to_vec();
+
+        let mut bad_magic = good.clone();
+        bad_magic[0] = b'X';
+        let mut bad_layout = good.clone();
+        bad_layout[4] = 9;
+        let truncated = good[..length - 1].to_vec();
+        // The last value is not a number; the first, volume, is valid and
+        // must still not be applied.
+        let mut not_finite = good.clone();
+        not_finite[length - 8..].copy_from_slice(&f64::NAN.to_le_bytes());
+
+        for case in [bad_magic, bad_layout, truncated, not_finite] {
+            let mut plugin = PortableSoundfonts::default();
+            assert!(!plugin.load_state(&case));
+            assert_eq!(plugin.get_parameter(0), Some(DEFAULT_MASTER_VOLUME));
+        }
+    }
+
+    #[test]
+    fn parameters_a_newer_build_saved_are_skipped() {
+        let mut state = STATE_MAGIC.to_vec();
+        state.extend_from_slice(&STATE_LAYOUT.to_le_bytes());
+        state.extend_from_slice(&2_u16.to_le_bytes());
+        for (index, value) in [(0_u32, 0.5_f64), (99, 7.0)] {
+            state.extend_from_slice(&index.to_le_bytes());
+            state.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut plugin = PortableSoundfonts::default();
+        assert!(plugin.load_state(&state));
+        assert_eq!(plugin.get_parameter(0), Some(0.5));
+    }
+
+    #[test]
+    fn state_covers_every_published_parameter() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../package/metadata/parameters.json")).unwrap();
+        let mut indices: Vec<u64> = schema["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|parameter| parameter["index"].as_u64().unwrap())
+            .collect();
+        indices.sort_unstable();
+        let expected: Vec<u64> = (0..u64::from(PARAMETER_COUNT)).collect();
+        assert_eq!(indices, expected);
+    }
+
+    #[test]
+    fn a_replacement_user_bank_keeps_the_selected_instrument() {
+        let bank = nki_bank::test_rf_bank(&[("left", 960), ("right", 960)]);
+        let mut plugin = PortableSoundfonts::default();
+        assert!(plugin.prepare(48_000.0, 128, 0, 2));
+        assert!(deliver(&mut plugin, USER_RESOURCE_ID, &bank));
+        assert!(plugin.load_preset("rf.right"));
+        assert!(deliver(&mut plugin, USER_RESOURCE_ID, &bank));
+        let player = plugin.instrument_bank.as_ref().unwrap();
+        assert!(player.is_preloaded());
+        assert_eq!(player.selected_id(), Some("rf.right"));
+    }
+
+    #[test]
+    #[ignore = "set RF_SOUNDFONTS_SF2 to a local SoundFont file to run"]
+    fn a_user_bank_releases_the_factory_soundfont() {
+        let path = std::env::var("RF_SOUNDFONTS_SF2").expect("RF_SOUNDFONTS_SF2 not set");
+        let factory = std::fs::read(path).expect("cannot read the SoundFont");
+        let mut plugin = PortableSoundfonts::default();
+        assert!(plugin.prepare(48_000.0, 128, 0, 2));
+        assert!(deliver(&mut plugin, RESOURCE_ID, &factory));
+        assert!(plugin.sound_font.is_some() && plugin.synth.is_some());
+
+        let bank = nki_bank::test_rf_bank(&[("left", 960)]);
+        assert!(deliver(&mut plugin, USER_RESOURCE_ID, &bank));
+        assert!(
+            plugin.sound_font.is_none(),
+            "factory SoundFont still resident"
+        );
+        assert!(plugin.synth.is_none());
+
+        let note_on = MidiEvent {
+            frame: 0,
+            data: [0x90, 60, 100],
+            length: 3,
+        };
+        let mut output = vec![0.0_f32; 128 * 2];
+        plugin.process(&[], &mut output, &[note_on], &[], 128, 0, 2);
+        assert!(output.iter().any(|sample| sample.abs() > 0.0));
     }
 
     #[test]
