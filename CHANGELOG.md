@@ -3,6 +3,37 @@
 All user-visible changes to the RF-Soundfonts plugin. Versions follow the
 plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
+## 0.6.4 — unreleased
+
+### Fixed
+
+- Selecting an instrument in an RF, Kontakt or SFZ bank no longer decodes
+  samples inside RackForge's audio callback. A bank that fits in memory is
+  decoded once while it is delivered, its archive is released, and switching
+  instruments afterwards allocates nothing. Banks too large for that still
+  decode the selected instrument on demand.
+- The sample memory limit is measured on decoded audio. It used to count file
+  bytes, so a 16-bit WAV took twice the memory it was allowed and a FLAC about
+  four times, enough to exhaust the component on realistic libraries. A bank's
+  archive plus its decoded samples now stays within 288 MiB.
+- Delivering a user bank releases the 113 MB factory SoundFont, which used to
+  stay resident behind it.
+- Volume, FX amount and the nine effect parameters are saved with RackForge
+  presets and sessions; they used to reset on every reload. Presets saved by
+  earlier versions still load, with default parameter values.
+
+### Safety
+
+- WAV and FLAC decoding refuse, before allocating, any sample whose header
+  declares more audio than the caller allows or than the file can hold. A
+  corrupt header used to request gigabytes up front and abort the component.
+
+### Changed
+
+- CONFIG's Builder applies the same decoded-size rule, reading each sample's
+  header, so it no longer produces banks the plugin refuses. The 160 MB
+  per-instrument file limit is gone.
+
 ## 0.6.3 — 2026-08-23
 
 ### Added

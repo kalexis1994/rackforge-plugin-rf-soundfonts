@@ -1,6 +1,6 @@
 # RF-Soundfonts project status
 
-Snapshot date: 2026-08-22
+Snapshot date: 2026-11-10
 
 Plugin ID: `org.rackforge.rf-soundfonts`
 
@@ -31,7 +31,8 @@ layers, splits or complete performance setups.
 - Note and velocity region selection.
 - PCM sample playback with root note, fine tuning, attenuation and loops.
 - DLS amplitude and pitch envelopes plus supported LFO destinations.
-- Up to 32 voices with sustain and deterministic voice cleanup.
+- Up to 32 voices in the native engine (96 for portable SoundFonts, 128 for
+  portable RF banks) with sustain and deterministic voice cleanup.
 - Live 14-bit pitch bend and CC1 modulation-wheel response.
 - Sample-positioned MIDI and parameter events inside an audio block.
 - Stereo output and allocation-free voice creation on the audio path.
@@ -41,13 +42,21 @@ layers, splits or complete performance setups.
 - Native Plugin API 1.5 adapter for the dynamic library catalog.
 - Portable `wasm-v1` SoundFont component for Windows, Android and Raspberry Pi.
 - The portable component publishes a dynamic preset catalog for the loaded
-  SoundFont, selects presets per bank and patch, and exposes a master-volume
-  parameter with sample-accurate automation.
+  SoundFont, selects presets per bank and patch, and exposes master volume, FX
+  amount and nine effect parameters with sample-accurate automation.
+- The portable state (layout 1) saves all eleven parameters, so RackForge
+  presets and sessions restore them. An empty state from an earlier version
+  restores the defaults.
+- An RF bank that fits in memory is decoded while it is delivered and its
+  archive released, so selecting an instrument inside RackForge's audio
+  callback decodes and allocates nothing. The bank's archive plus decoded
+  samples are capped at 288 MiB, measured on the decoded 32-bit audio.
 - A user bank chosen in CONFIG is installed into private plugin storage
   (`user-soundfont`), so it survives restarts and is delivered to every new
   instance after the factory bank.
 - Read-only dynamic catalogs generated from installed libraries.
-- State version 4 stores master gain and the selected library sound.
+- The native adapter's state version 4 stores master gain and the selected
+  library sound.
 - State readers for versions 1 through 3. A version 3 Custom Program state is
   migrated to its primary library instrument; layer and effect overrides are
   intentionally discarded.
@@ -73,6 +82,12 @@ layers, splits or complete performance setups.
 - DLS-2 articulation coverage is partial.
 - Proprietary or encrypted library content may be rejected.
 - Large libraries still require ARM64 memory and CPU profiling.
+- A bank too large to preload decodes a newly selected instrument inside
+  RackForge's audio callback, because that is where the host selects sounds.
+  Removing that last dropout needs the host to select them off the audio
+  thread.
+- Decoded samples are held as 32-bit float. Holding 16-bit sources at their
+  own width would halve their memory.
 
 ## Next recommended milestone
 

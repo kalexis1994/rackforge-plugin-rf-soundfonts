@@ -90,9 +90,13 @@ being rewritten by a browser editor that cannot faithfully represent every
 Kontakt feature yet. Existing WAV, WAVE and FLAC layers are supported.
 
 The converter preserves the folder structure, includes every compatible
-instrument map, sample and artwork file, and writes a small `bank.json`. The
-plugin keeps the compressed archive in memory but decodes only the samples used
-by the selected instrument.
+instrument map, sample and artwork file, and writes a small `bank.json`. When
+the whole bank fits in memory the plugin decodes it once on delivery and
+releases the archive, so switching instruments while playing costs nothing;
+larger banks keep the archive and decode only the selected instrument. Either
+way, the archive plus its decoded samples must fit in 288 MiB, measured on the
+decoded audio, which is about twice a 16-bit WAV's size and four times a
+FLAC's.
 
 Selecting an `.sfz` follows the same library flow. RackForge collects its
 includes, WAV/FLAC samples and explicit surface artwork into a portable RF
