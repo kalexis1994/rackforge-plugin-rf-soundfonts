@@ -40,7 +40,10 @@ layers, splits or complete performance setups.
 ## RackForge integration
 
 - Native Plugin API 1.5 adapter for the dynamic library catalog.
-- Portable `wasm-v1` SoundFont component for Windows, Android and Raspberry Pi.
+- Portable `wasm-v1` SoundFont component for Windows, Android and Raspberry Pi,
+  built as a 1.2 component and requiring RackForge plugin API 1.9: the first
+  version that guarantees the resource-preview and activation methods its
+  surfaces call.
 - The portable component publishes a dynamic preset catalog for the loaded
   SoundFont, selects presets per bank and patch, and exposes master volume, FX
   amount and nine effect parameters with sample-accurate automation.

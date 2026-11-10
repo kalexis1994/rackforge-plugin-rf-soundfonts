@@ -161,10 +161,11 @@ tooling without deploy keys or repository secrets.
 
 ## Compatibility
 
-RF-Soundfonts `0.6.3` targets RackForge Plugin API `1.7`, the portable
-`wasm-v1` runtime, and the `little@1` controller surface. RackForge SDK sources
-and package tooling remain pinned to tested Git revisions for reproducible
-builds.
+RF-Soundfonts `0.7.0` requires RackForge Plugin API `1.9` or newer, the
+portable `wasm-v1` runtime (it ships a 1.2 component), and the `little@1`
+controller surface. RackForge SDK sources and package tooling remain pinned to
+tested Git revisions for reproducible builds; `Cargo.toml` explains why the pin
+stops short of component ABI 1.3.
 
 ## Licensing
 

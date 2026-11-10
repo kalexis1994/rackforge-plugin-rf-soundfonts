@@ -3,6 +3,28 @@
 All user-visible changes to the RF-Soundfonts plugin. Versions follow the
 plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
+## 0.7.0 — 2026-11-10
+
+### Changed
+
+- RF-Soundfonts now requires RackForge plugin API 1.9. CONFIG and PLAY call
+  `plugin.preview_resource` and `plugin.activate_resource` and send
+  `edit_mode`, which RackForge added while its plugin API was still 1.8; on an
+  older host the plugin installed and then failed when a surface used them. A
+  host older than API 1.9 now refuses it at install with a clear message.
+- The SDK moves from RackForge `48bf53f` (19 August 2026) to `9bbd6b01`
+  (16 September 2026), the last revision whose SDK builds a wasm-v1 1.2
+  component. Component ABI 1.3 has no plugin API version of its own yet, so a
+  manifest could not name the hosts that accept it. The reverb and every other
+  DSP the plugin uses are unchanged between the two revisions.
+
+### Verified
+
+- The released component compiles, instantiates, loads an RF bank, plays and
+  round-trips its state on the runtimes of three RackForge hosts: `796249a7`
+  (the first with plugin API 1.9), `9bbd6b01` (the pin) and `972dfa50`
+  (RackForge 0.1.36, current).
+
 ## 0.6.4 — 2026-11-10
 
 ### Fixed
