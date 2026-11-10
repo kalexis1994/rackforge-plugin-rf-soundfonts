@@ -2,7 +2,7 @@ schema_version = 2
 id = "org.rackforge.rf-soundfonts"
 name = "RF-Soundfonts"
 vendor = "RackForge"
-version = "0.6.4"
+version = "0.7.0"
 description = "A portable RF-Soundfonts instrument library with a factory grand piano ready to perform."
 kind = "instrument"
 state_version = 1
@@ -36,9 +36,14 @@ entry = "web/play.html"
 kind = "config"
 entry = "web/config.html"
 
+# CONFIG and PLAY call plugin.preview_resource and plugin.activate_resource and
+# send edit_mode. RackForge added them on 22-23 August 2026 while its plugin API
+# was still 1.8 and moved to 1.9 the next day, so 1.9 is the first version that
+# guarantees them: an older host refuses the plugin at install instead of
+# failing when a surface calls them.
 [api]
 major = 1
-minor = 7
+minor = 9
 
 [[resources]]
 id = "factory-soundfont"

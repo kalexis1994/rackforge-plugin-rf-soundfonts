@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.4"
+version = "0.7.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/kalexis1994/rackforge-plugin-rf-soundfonts"
@@ -25,6 +25,13 @@ rustysynth = { version = "1.3.6", default-features = false }
 # `.github/workflows/build-plugin.yml`. Contributors can override them with the
 # adjacent local checkout through `.cargo/config.toml`; see
 # `.cargo/config.toml.example`.
-rackforge-plugin-api = { git = "https://github.com/kalexis1994/rackforge.git", rev = "48bf53f1c9a6b6dc2ec2269ad5b390f796619ec9" }
-rackforge-plugin-sdk = { git = "https://github.com/kalexis1994/rackforge.git", rev = "48bf53f1c9a6b6dc2ec2269ad5b390f796619ec9" }
-rackforge-dsp = { git = "https://github.com/kalexis1994/rackforge.git", rev = "48bf53f1c9a6b6dc2ec2269ad5b390f796619ec9" }
+#
+# The pin is deliberately the last revision whose SDK builds a wasm-v1 1.2
+# component. Component ABI 1.3 arrived in RackForge 1cd7b21c without a new
+# plugin API version, so no manifest `[api] minor` can name the hosts that
+# accept it, and hosts built between 6 and 16 September 2026 would reject it
+# despite passing the manifest check. Move the pin past 1cd7b21c only once
+# RackForge gives component ABI 1.3 its own plugin API version.
+rackforge-plugin-api = { git = "https://github.com/kalexis1994/rackforge.git", rev = "9bbd6b01e287bdfef9acd45e5ff2cd0274b06994" }
+rackforge-plugin-sdk = { git = "https://github.com/kalexis1994/rackforge.git", rev = "9bbd6b01e287bdfef9acd45e5ff2cd0274b06994" }
+rackforge-dsp = { git = "https://github.com/kalexis1994/rackforge.git", rev = "9bbd6b01e287bdfef9acd45e5ff2cd0274b06994" }

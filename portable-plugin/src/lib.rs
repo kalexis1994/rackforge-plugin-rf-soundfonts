@@ -1148,6 +1148,33 @@ mod tests {
     }
 
     #[test]
+    fn the_declared_api_covers_the_host_methods_the_surfaces_call() {
+        // RackForge added these between plugin API 1.8 and 1.9; the comment
+        // above `[api]` in the manifest says why 1.9 is the floor.
+        let surfaces = include_str!("../package/web/app.js");
+        let needs_1_9 = [
+            "plugin.preview_resource",
+            "plugin.activate_resource",
+            "edit_mode",
+        ]
+        .iter()
+        .any(|feature| surfaces.contains(feature));
+        let manifest = include_str!("../package/rackforge-plugin.toml");
+        let minor: u32 = manifest
+            .lines()
+            .skip_while(|line| line.trim() != "[api]")
+            .find_map(|line| line.trim().strip_prefix("minor = "))
+            .and_then(|value| value.parse().ok())
+            .expect("the manifest declares [api] minor");
+        if needs_1_9 {
+            assert!(
+                minor >= 9,
+                "the surfaces need plugin API 1.9, manifest says 1.{minor}"
+            );
+        }
+    }
+
+    #[test]
     fn package_metadata_matches_the_crate_version() {
         let version = env!("CARGO_PKG_VERSION");
         let manifest = include_str!("../package/rackforge-plugin.toml");
