@@ -41,6 +41,22 @@ pub fn load_wave(path: impl AsRef<Path>) -> Result<Wave, SoundfontError> {
 
 /// Decodes WAV bytes already held in memory.
 pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
+    decode_limited(bytes, name, usize::MAX)
+}
+
+/// Decodes WAV bytes, refusing a file that would yield more than
+/// `max_samples` interleaved samples.
+///
+/// The length is checked against the header before anything is allocated, so
+/// a file too large for the caller's memory is refused rather than exhausting
+/// it. A header claiming more audio than the file can hold is refused for any
+/// limit: decoding allocates for the declared length up front, and a lie there
+/// would otherwise ask for gigabytes on a corrupt file.
+pub fn decode_limited(
+    bytes: &[u8],
+    name: String,
+    max_samples: usize,
+) -> Result<Wave, SoundfontError> {
     let reader = match hound::WavReader::new(bytes) {
         Ok(reader) => reader,
         // Old exporters write a `fmt ` chunk of a size the specification does
@@ -49,11 +65,24 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
         // PCM and perfectly readable, so a lenient pass reads it rather than
         // losing an instrument over four bytes of padding.
         Err(strict) => {
-            return decode_plain_pcm(bytes, &name).ok_or_else(|| {
+            return decode_plain_pcm(bytes, &name, max_samples)?.ok_or_else(|| {
                 SoundfontError::Invalid(format!("cannot read WAV {name:?}: {strict}"))
             });
         }
     };
+    let declared = reader.len() as usize;
+    // Every sample occupies at least one byte, so a longer claim is a lie.
+    if declared > bytes.len() {
+        return Err(SoundfontError::Invalid(format!(
+            "WAV {name:?} declares more audio than the file holds"
+        )));
+    }
+    if declared > max_samples {
+        return Err(SoundfontError::TooLarge {
+            name,
+            limit: max_samples,
+        });
+    }
     let spec = reader.spec();
     if spec.channels == 0 || spec.channels > MAX_CHANNELS {
         return Err(SoundfontError::Unsupported(format!(
@@ -73,7 +102,7 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
             "WAV {name:?} contains no audio"
         )));
     }
-    if samples.len() % usize::from(spec.channels) != 0 {
+    if !samples.len().is_multiple_of(usize::from(spec.channels)) {
         return Err(SoundfontError::Invalid(format!(
             "WAV {name:?} ends on a partial frame"
         )));
@@ -136,13 +165,61 @@ fn decode_samples(
 /// sixteen bytes of `fmt `, which are fixed whatever size the chunk declares.
 /// Anything else is declined, so a genuinely broken file still fails rather
 /// than being interpreted into noise.
-fn decode_plain_pcm(bytes: &[u8], name: &str) -> Option<Wave> {
+fn decode_plain_pcm(
+    bytes: &[u8],
+    name: &str,
+    max_samples: usize,
+) -> Result<Option<Wave>, SoundfontError> {
     const HEADER: usize = 12;
-    const PCM: u16 = 1;
 
     if bytes.len() < HEADER || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return None;
+        return Ok(None);
     }
+    // The audio is clamped to the bytes actually present, so its length is
+    // known before anything is allocated.
+    let Some((data, width)) = plain_pcm_layout(bytes) else {
+        return Ok(None);
+    };
+    if data.len() / width > max_samples {
+        return Err(SoundfontError::TooLarge {
+            name: name.to_string(),
+            limit: max_samples,
+        });
+    }
+    Ok(read_plain_pcm(bytes, name))
+}
+
+/// The `data` chunk and sample width a lenient read would decode.
+fn plain_pcm_layout(bytes: &[u8]) -> Option<(&[u8], usize)> {
+    const HEADER: usize = 12;
+    let mut bits = None;
+    let mut audio = None;
+    let mut cursor = HEADER;
+    while cursor + 8 <= bytes.len() {
+        let id = &bytes[cursor..cursor + 4];
+        let size = u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().ok()?) as usize;
+        let body = cursor + 8;
+        let end = body.checked_add(size)?.min(bytes.len());
+        if id == b"fmt " && size >= 16 {
+            bits = bytes
+                .get(body + 14..body + 16)
+                .and_then(|slice| slice.try_into().ok())
+                .map(u16::from_le_bytes);
+        } else if id == b"data" {
+            audio = Some(&bytes[body..end]);
+        }
+        cursor = end + (size & 1);
+    }
+    let width = match bits? {
+        bits @ (8 | 16 | 24 | 32) => usize::from(bits) / 8,
+        _ => return None,
+    };
+    Some((audio?, width))
+}
+
+fn read_plain_pcm(bytes: &[u8], name: &str) -> Option<Wave> {
+    const HEADER: usize = 12;
+    const PCM: u16 = 1;
     let word = |at: usize| -> Option<u16> {
         bytes
             .get(at..at + 2)
@@ -379,6 +456,57 @@ mod tests {
         assert_eq!(wave.channels, 1);
         assert_eq!(wave.frame_count(), 2);
         assert!((wave.samples[0] - 0.5).abs() < 1e-3, "{}", wave.samples[0]);
+    }
+
+    /// The same twenty-byte `fmt ` file, which only the lenient path reads.
+    fn odd_fmt_wav(samples: &[f32]) -> Vec<u8> {
+        let mut bytes = write_wav(spec(1, 16, hound::SampleFormat::Int), samples);
+        bytes[16..20].copy_from_slice(&20_u32.to_le_bytes());
+        bytes.splice(36..36, [0, 0, 0, 0]);
+        let total = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&total.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_limit_is_enforced_before_decoding() {
+        let samples = [0.25_f32; 1_000];
+        let bytes = write_wav(spec(1, 16, hound::SampleFormat::Int), &samples);
+        assert!(matches!(
+            decode_limited(&bytes, "big".into(), 999),
+            Err(SoundfontError::TooLarge { limit: 999, .. })
+        ));
+        let wave = decode_limited(&bytes, "big".into(), 1_000).unwrap();
+        assert_eq!(wave.samples.len(), 1_000);
+    }
+
+    #[test]
+    fn the_lenient_path_obeys_the_same_limit() {
+        let bytes = odd_fmt_wav(&[0.5; 64]);
+        assert!(matches!(
+            decode_limited(&bytes, "odd-fmt".into(), 63),
+            Err(SoundfontError::TooLarge { .. })
+        ));
+        assert_eq!(
+            decode_limited(&bytes, "odd-fmt".into(), 64)
+                .unwrap()
+                .samples
+                .len(),
+            64
+        );
+    }
+
+    #[test]
+    fn a_header_claiming_more_audio_than_the_file_is_refused() {
+        // Decoding reserves for the declared length up front, so a lying
+        // `data` size used to ask for gigabytes on a file of a few bytes.
+        let mut bytes = write_wav(spec(1, 16, hound::SampleFormat::Int), &[0.5, -0.5]);
+        let data = bytes.windows(4).position(|id| id == b"data").unwrap();
+        bytes[data + 4..data + 8].copy_from_slice(&0x7fff_fff0_u32.to_le_bytes());
+        assert!(matches!(
+            decode(&bytes, "liar".into()),
+            Err(SoundfontError::Invalid(_))
+        ));
     }
 
     #[test]

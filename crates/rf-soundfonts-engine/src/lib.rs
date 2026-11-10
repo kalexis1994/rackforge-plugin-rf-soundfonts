@@ -53,6 +53,11 @@ pub enum SoundfontError {
     Invalid(String),
     #[error("unsupported DLS feature: {0}")]
     Unsupported(String),
+    /// A sample would decode to more audio than its caller allowed. Kept apart
+    /// from `Invalid` so a caller with a memory budget can tell "does not fit"
+    /// from "is broken" and decide what to do about it.
+    #[error("{name:?} decodes to more than {limit} samples")]
+    TooLarge { name: String, limit: usize },
 }
 
 #[derive(Clone, Debug)]

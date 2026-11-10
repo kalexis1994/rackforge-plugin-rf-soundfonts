@@ -35,6 +35,26 @@ pub fn load_wave(path: impl AsRef<Path>) -> Result<Wave, SoundfontError> {
 
 /// Decodes FLAC bytes already held in memory.
 pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
+    decode_limited(bytes, name, usize::MAX)
+}
+
+/// Samples reserved up front per byte of FLAC when the stream declares its
+/// length. Ordinary audio compresses two- to threefold; reserving for far more
+/// than that would let a header that lies about its length ask for gigabytes.
+/// Streams that genuinely compress harder simply grow as they decode.
+const RESERVED_SAMPLES_PER_BYTE: usize = 16;
+
+/// Decodes FLAC bytes, refusing a stream that would yield more than
+/// `max_samples` interleaved samples.
+///
+/// A declared length over the limit is refused before anything is allocated,
+/// and the limit is enforced again while decoding, so a stream that does not
+/// declare its length, or misdeclares it, cannot grow past it either.
+pub fn decode_limited(
+    bytes: &[u8],
+    name: String,
+    max_samples: usize,
+) -> Result<Wave, SoundfontError> {
     let mut reader = claxon::FlacReader::new(std::io::Cursor::new(bytes))
         .map_err(|error| SoundfontError::Invalid(format!("cannot read FLAC {name:?}: {error}")))?;
     let info = reader.streaminfo();
@@ -60,12 +80,43 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
     // width, so one divisor derived from the declared depth normalises every
     // case the format allows.
     let scale = 1.0_f32 / (1_i64 << (info.bits_per_sample - 1)) as f32;
-    let mut samples = Vec::with_capacity(
-        usize::try_from(info.samples.unwrap_or(0)).unwrap_or(0) * info.channels as usize,
-    );
+    let declared = info
+        .samples
+        .and_then(|frames| frames.checked_mul(u64::from(info.channels)))
+        .map(|samples| usize::try_from(samples).unwrap_or(usize::MAX));
+    if declared.is_some_and(|declared| declared > max_samples) {
+        return Err(SoundfontError::TooLarge {
+            name,
+            limit: max_samples,
+        });
+    }
+    let too_large = |name: &str| SoundfontError::TooLarge {
+        name: name.to_string(),
+        limit: max_samples,
+    };
+    let mut samples: Vec<f32> = Vec::new();
+    samples
+        .try_reserve_exact(
+            declared
+                .unwrap_or(0)
+                .min(max_samples)
+                .min(bytes.len().saturating_mul(RESERVED_SAMPLES_PER_BYTE)),
+        )
+        .map_err(|_| too_large(&name))?;
     for sample in reader.samples() {
         let value =
             sample.map_err(|error| SoundfontError::Invalid(format!("FLAC {name:?}: {error}")))?;
+        if samples.len() >= max_samples {
+            return Err(too_large(&name));
+        }
+        if samples.len() == samples.capacity() {
+            // Grow by hand rather than letting `push` double: doubling could
+            // reserve twice the limit just before reaching it.
+            let room = max_samples - samples.len();
+            samples
+                .try_reserve_exact(samples.capacity().max(4_096).min(room))
+                .map_err(|_| too_large(&name))?;
+        }
         samples.push(value as f32 * scale);
     }
 
@@ -74,7 +125,7 @@ pub fn decode(bytes: &[u8], name: String) -> Result<Wave, SoundfontError> {
             "FLAC {name:?} contains no audio"
         )));
     }
-    if samples.len() % info.channels as usize != 0 {
+    if !samples.len().is_multiple_of(info.channels as usize) {
         return Err(SoundfontError::Invalid(format!(
             "FLAC {name:?} ends on a partial frame"
         )));
@@ -182,6 +233,41 @@ mod tests {
             wave.samples.iter().all(|sample| sample.abs() <= 1.0),
             "decoded audio exceeds full scale"
         );
+    }
+
+    /// A stream holding only its STREAMINFO block: enough for every check
+    /// that runs before the first frame is decoded.
+    fn header_only_flac(total_frames: u64, channels: u8) -> Vec<u8> {
+        let mut bytes = b"fLaC".to_vec();
+        bytes.push(0x80); // last metadata block, type STREAMINFO
+        bytes.extend_from_slice(&[0, 0, 34]);
+        bytes.extend_from_slice(&4_096_u16.to_be_bytes());
+        bytes.extend_from_slice(&4_096_u16.to_be_bytes());
+        bytes.extend_from_slice(&[0; 6]); // frame sizes unknown
+        let packed = (48_000_u64 << 44)
+            | (u64::from(channels - 1) << 41)
+            | (15_u64 << 36) // 16-bit
+            | (total_frames & ((1 << 36) - 1));
+        bytes.extend_from_slice(&packed.to_be_bytes());
+        bytes.extend_from_slice(&[0; 16]); // MD5 unknown
+        bytes
+    }
+
+    #[test]
+    fn a_declared_length_over_the_limit_is_refused_before_decoding() {
+        let bytes = header_only_flac(1_000, 2);
+        assert!(matches!(
+            decode_limited(&bytes, "big".into(), 1_999),
+            Err(SoundfontError::TooLarge { limit: 1_999, .. })
+        ));
+    }
+
+    #[test]
+    fn an_absurd_declared_length_does_not_reserve_it() {
+        // 2^36 stereo frames would be half a terabyte of f32. Reserving it up
+        // front used to abort the process before any frame was read.
+        let bytes = header_only_flac((1 << 36) - 1, 2);
+        assert!(decode(&bytes, "liar".into()).is_err());
     }
 
     #[test]
