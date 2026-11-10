@@ -83,7 +83,7 @@ fn parse_state(state: &[u8]) -> Option<[Option<f64>; PARAMETER_COUNT as usize]> 
         return None;
     }
     let mut values = [None; PARAMETER_COUNT as usize];
-    for entry in body.chunks_exact(STATE_ENTRY_BYTES) {
+    for entry in body.as_chunks::<STATE_ENTRY_BYTES>().0 {
         let index = u32::from_le_bytes(entry[..4].try_into().ok()?);
         let value = f64::from_le_bytes(entry[4..].try_into().ok()?);
         if !value.is_finite() {
@@ -403,9 +403,11 @@ impl Processor for PortableSoundfonts {
         state[..4].copy_from_slice(STATE_MAGIC);
         state[4..6].copy_from_slice(&STATE_LAYOUT.to_le_bytes());
         state[6..8].copy_from_slice(&(PARAMETER_COUNT as u16).to_le_bytes());
-        for (index, entry) in (0..PARAMETER_COUNT)
-            .zip(state[STATE_HEADER_BYTES..].chunks_exact_mut(STATE_ENTRY_BYTES))
-        {
+        for (index, entry) in (0..PARAMETER_COUNT).zip(
+            state[STATE_HEADER_BYTES..]
+                .as_chunks_mut::<STATE_ENTRY_BYTES>()
+                .0,
+        ) {
             entry[..4].copy_from_slice(&index.to_le_bytes());
             entry[4..].copy_from_slice(&self.get_parameter(index)?.to_le_bytes());
         }
