@@ -1179,7 +1179,10 @@
   const zoneEnvelopeHost = document.querySelector("[data-zone-envelope]");
   const layerList = document.querySelector("[data-layer-list]");
   const BUILDER_DRAFT_KEY = "rf-soundfonts.instrument-builder.v1";
-  const SAMPLE_LIMIT_BYTES = 160 * 1_048_576;
+  // Mirrors MAX_RESIDENT_SAMPLE_BYTES in portable-plugin/src/nki_bank.rs: a
+  // bank's archive plus one instrument's samples, decoded to 32-bit float,
+  // must fit or the plugin refuses the instrument. Change both together.
+  const RESIDENT_LIMIT_BYTES = 288 * 1_048_576;
   const MAX_BANK_BYTES = 128 * 1_048_576;
   const MAX_BANK_ENTRIES = 8_192;
   const MAX_MAP_BYTES = 2 * 1_048_576;
@@ -2205,6 +2208,53 @@
 
   const sampleMime = (name) => name.toLowerCase().endsWith(".flac") ? "audio/flac" : "audio/wav";
 
+  // Interleaved samples a WAV or FLAC decodes to, read from its header so a
+  // large sample is never decoded just to be measured. A header that cannot
+  // be read, or a FLAC that does not declare its length, counts one sample a
+  // byte: the most a WAV can hold, and typical of 16-bit FLAC. The plugin
+  // stays authoritative when it loads the bank.
+  const decodedSampleCount = async (file) => {
+    const head = new DataView(await file.slice(0, 1_048_576).arrayBuffer());
+    const ascii = (at) => String.fromCharCode(
+      head.getUint8(at), head.getUint8(at + 1), head.getUint8(at + 2), head.getUint8(at + 3));
+    if (head.byteLength >= 12 && ascii(0) === "RIFF" && ascii(8) === "WAVE") {
+      let bits = 0;
+      let cursor = 12;
+      while (cursor + 8 <= head.byteLength) {
+        const id = ascii(cursor);
+        const size = head.getUint32(cursor + 4, true);
+        if (id === "fmt " && cursor + 24 <= head.byteLength) bits = head.getUint16(cursor + 22, true);
+        else if (id === "data") {
+          const audio = Math.min(size, file.size - cursor - 8);
+          return [8, 16, 24, 32].includes(bits) ? Math.floor(audio / (bits / 8)) : file.size;
+        }
+        cursor += 8 + size + (size & 1);
+      }
+      return file.size;
+    }
+    // STREAMINFO is always the first metadata block; its packed field holds
+    // the channel count and the 36-bit length in frames.
+    if (head.byteLength >= 26 && ascii(0) === "fLaC" && (head.getUint8(4) & 0x7f) === 0) {
+      const high = head.getUint32(18);
+      const frames = (high & 0xf) * 2 ** 32 + head.getUint32(22);
+      const channels = ((high >>> 9) & 0x7) + 1;
+      if (frames > 0) return frames * channels;
+    }
+    return file.size;
+  };
+
+  // Bytes the plugin needs beyond the archive when, once decoded, an
+  // instrument's samples exceed the resident limit; zero when they fit.
+  const residentOverflow = async (archiveBytes, files) => {
+    let total = archiveBytes;
+    for (const file of new Set(files)) total += (await decodedSampleCount(file)) * 4;
+    return total > RESIDENT_LIMIT_BYTES ? total : 0;
+  };
+
+  const megabytes = (bytes) => `${Math.ceil(bytes / 1_048_576)} MB`;
+  const residentMessage = (label, needed) => `${label} needs ${megabytes(needed)} once its samples are decoded; `
+    + `the plugin allows ${megabytes(RESIDENT_LIMIT_BYTES)} including the bank itself.`;
+
   const importRfInstrument = async (archive, entry, instrumentIndex, sampleEntries) => {
     const value = await readZipJson(archive, entry, entry.name);
     if (Number(value.schema_version ?? 0) > 1) throw zipError(`${entry.name} uses a newer instrument schema`);
@@ -2218,8 +2268,6 @@
       _rf_id: String(value.id || "").trim(),
     };
     const files = new Map();
-    let instrumentSampleBytes = 0;
-    const countedSamples = new Set();
     for (const [zoneIndex, sourceZone] of value.zones.entries()) {
       const label = `${entry.name} zone ${zoneIndex + 1}`;
       if (!sourceZone || typeof sourceZone !== "object" || Array.isArray(sourceZone)) throw zipError(`${label} is not an object`);
@@ -2262,11 +2310,6 @@
             || !Number.isFinite(tune) || tune < -48 || tune > 48) {
           throw zipError(`${label} layer ${layerIndex + 1} has invalid playback values`);
         }
-        if (!countedSamples.has(sampleEntry.foldedName)) {
-          countedSamples.add(sampleEntry.foldedName);
-          instrumentSampleBytes += sampleEntry.size;
-        }
-        if (instrumentSampleBytes > SAMPLE_LIMIT_BYTES) throw zipError(`${entry.name} exceeds the 160 MB selected-instrument sample limit`);
         const layer = {
           id: builderId("layer"),
           sample_name: sampleEntry.name.split("/").at(-1),
@@ -2291,6 +2334,8 @@
       }
       state.zones.push(zone);
     }
+    const overflow = await residentOverflow(archive.bytes.byteLength, [...files.values()]);
+    if (overflow) throw zipError(residentMessage(entry.name, overflow));
     return { path: entry.name, foldedPath: entry.foldedName, state, files };
   };
 
@@ -2468,23 +2513,14 @@
     if (!name) return { error: "Give the instrument a name." };
     if (!state.zones.length) return { error: "Add at least one key zone." };
     const files = [];
-    let totalBytes = 0;
-    const countedFiles = new Set();
     for (const zone of state.zones) {
       const zoneError = validateZone(zone, true);
       if (zoneError) return { error: `${zone.name}: ${zoneError}` };
       for (const layer of zone.layers) {
         const file = filesMap.get(layer.id);
         if (!file) return { error: `${zone.name}: choose the sample for ${layer.sample_name || "every velocity layer"}.` };
-        if (!countedFiles.has(file)) {
-          countedFiles.add(file);
-          totalBytes += file.size;
-        }
         files.push([layer, file]);
       }
-    }
-    if (totalBytes > SAMPLE_LIMIT_BYTES) {
-      return { error: "This instrument exceeds the 160 MB decoded-sample limit." };
     }
     return { name, files };
   };
@@ -2586,7 +2622,10 @@
     if (entries.length > MAX_BANK_ENTRIES || totalBytes > MAX_BANK_BYTES) {
       throw new Error("The audition bank exceeds the 128 MB runtime limit.");
     }
-    return { blob: makeZip(entries), name: validation.name };
+    const blob = makeZip(entries);
+    const overflow = await residentOverflow(blob.size, validation.files.map(([, file]) => file));
+    if (overflow) throw new Error(residentMessage("This instrument", overflow));
+    return { blob, name: validation.name };
   };
 
   const syncBuilderPreview = async () => {
@@ -2647,9 +2686,11 @@
     const usedPaths = new Set(openedBank?.entries.map((entry) => entry.foldedName) || []);
     const assignedFilePaths = new Map();
     const instrumentNames = [];
+    const instrumentFiles = [];
     for (const descriptor of descriptors) {
       const validation = validateBuilderState(descriptor.state, descriptor.files);
       if (validation.error) throw new Error(`${descriptor.state.name}: ${validation.error}`);
+      instrumentFiles.push([validation.name, validation.files.map(([, file]) => file)]);
       const state = descriptor.state;
       const instrumentSlug = slugFile(state._rf_id || validation.name);
       instrumentNames.push(validation.name);
@@ -2742,8 +2783,13 @@
     if (entries.length > MAX_BANK_ENTRIES || totalBytes > MAX_BANK_BYTES) {
       throw new Error("The edited RF Bank exceeds the 8,192-entry or 128 MB runtime limit.");
     }
+    const blob = makeZip(entries);
+    for (const [name, files] of instrumentFiles) {
+      const overflow = await residentOverflow(blob.size, files);
+      if (overflow) throw new Error(residentMessage(name, overflow));
+    }
     return {
-      blob: makeZip(entries),
+      blob,
       suggestedName: openedBank?.fileName || `${primarySlug}.rfbank`,
       label: openedBank?.manifest?.name || instrumentNames[0],
     };
