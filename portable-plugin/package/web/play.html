@@ -61,7 +61,7 @@
               <strong data-bank-control-title>Output</strong>
             </div>
             <div class="control-stack">
-              <div class="volume-card">
+              <div class="volume-card" data-rackforge-parameter-index="0">
                 <label for="master-volume">MASTER</label>
                 <input id="master-volume" type="range" min="0" max="1" step="0.01"
                        value="0.9" data-volume disabled>
@@ -75,9 +75,9 @@
                     <small data-fx-action>EDIT</small>
                     <i aria-hidden="true">›</i>
                   </button>
-                  <label for="fx-amount">MIX</label>
+                  <label for="fx-amount" data-rackforge-parameter-index="1">MIX</label>
                   <input id="fx-amount" type="range" min="0" max="1" step="0.01"
-                         value="1" data-fx-amount disabled>
+                         value="1" data-fx-amount data-rackforge-parameter-index="1" disabled>
                   <output data-fx-amount-value>—</output>
                 </div>
                 <div class="fx-editor" id="fx-editor" data-fx-editor hidden>

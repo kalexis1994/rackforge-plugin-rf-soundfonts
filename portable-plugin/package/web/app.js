@@ -396,6 +396,7 @@
       )) {
         const control = document.createElement("label");
         control.className = "fx-parameter";
+        control.dataset.rackforgeParameterIndex = definition.index;
         const copy = document.createElement("span");
         copy.textContent = definition.label;
         const input = document.createElement("input");
@@ -812,6 +813,15 @@
     fxAmountValue.textContent = `${Math.round(value * 100)}%`;
   };
 
+  const showFxParameter = (definition, value) => {
+    const input = fxParameters?.querySelector(`[data-fx-parameter="${definition.index}"]`);
+    if (!(input instanceof HTMLInputElement)) return;
+    input.disabled = false;
+    input.value = String(value);
+    const output = fxParameters.querySelector(`[data-fx-parameter-value="${definition.index}"]`);
+    if (output) output.textContent = formatEffectValue(definition, value);
+  };
+
   const refreshVolume = () => {
     if (!volume) return Promise.resolve();
     return hostRequest("plugin.parameters", {})
@@ -829,17 +839,7 @@
         }
         for (const definition of FX_CONTROL_DEFINITIONS) {
           const entry = values.find((candidate) => candidate.index === definition.index);
-          const input = fxParameters?.querySelector(
-            `[data-fx-parameter="${definition.index}"]`,
-          );
-          const output = fxParameters?.querySelector(
-            `[data-fx-parameter-value="${definition.index}"]`,
-          );
-          if (input instanceof HTMLInputElement && entry && Number.isFinite(entry.value)) {
-            input.disabled = false;
-            input.value = String(entry.value);
-            if (output) output.textContent = formatEffectValue(definition, entry.value);
-          }
+          if (Number.isFinite(entry?.value)) showFxParameter(definition, entry.value);
         }
       })
       .catch(() => {
@@ -2872,6 +2872,16 @@
       event.source !== window.parent ||
       event.data?.protocol !== PROTOCOL
     ) return;
+    if (event.data.kind === "parameter_changed" && Number.isFinite(event.data.value)) {
+      const { parameter_index: index, value } = event.data;
+      if (index === 0) showVolume(value);
+      else if (index === 1) showFxAmount(value);
+      else {
+        const definition = FX_CONTROL_DEFINITIONS.find((item) => item.index === index);
+        if (definition) showFxParameter(definition, value);
+      }
+      return;
+    }
     if (event.data.kind === "response") {
       const request = pending.get(event.data.request_id);
       if (!request) return;
