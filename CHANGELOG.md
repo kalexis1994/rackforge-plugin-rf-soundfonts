@@ -3,6 +3,14 @@
 All user-visible changes to the RF-Soundfonts plugin. Versions follow the
 plugin manifest; a `vX.Y.Z` tag publishes the matching GitHub release.
 
+## 0.7.1 — 2026-11-16
+
+### Added
+
+- Right-click the master volume and the mix, reverb and delay controls of
+  compatible programs to link them to MIDI in RackForge.
+
+
 ## 0.7.0 — 2026-11-10
 
 ### Changed
