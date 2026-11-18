@@ -1,11 +1,14 @@
-# Copy this file to `.cargo/config.toml` when RackForge and RF-Soundfonts are checked
-# out as adjacent directories. The generated local file is intentionally
-# ignored so release builds continue to use the pinned SDK revision.
+# For adjacent RackForge development, copy this file to `.cargo/config.toml`
+# in the directory that holds this checkout and `rackforge` side by side --
+# not into this repository, whose own `.cargo/config.toml` carries the build
+# flags every checkout needs. Cargo reads both, and one copy there serves
+# every plugin checked out beside RackForge. Paths are relative to that
+# directory.
 
 [patch."https://github.com/kalexis1994/rackforge.git"]
-rackforge-plugin-api = { path = "../rackforge/crates/rackforge-plugin-api" }
-rackforge-plugin-sdk = { path = "../rackforge/crates/rackforge-plugin-sdk" }
-rackforge-dsp = { path = "../rackforge/crates/rackforge-dsp" }
-rackforge-midi-api = { path = "../rackforge/crates/rackforge-midi-api" }
-rackforge-program-api = { path = "../rackforge/crates/rackforge-program-api" }
-rackforge-surface-api = { path = "../rackforge/crates/rackforge-surface-api" }
+rackforge-plugin-api = { path = "rackforge/crates/rackforge-plugin-api" }
+rackforge-plugin-sdk = { path = "rackforge/crates/rackforge-plugin-sdk" }
+rackforge-dsp = { path = "rackforge/crates/rackforge-dsp" }
+rackforge-midi-api = { path = "rackforge/crates/rackforge-midi-api" }
+rackforge-program-api = { path = "rackforge/crates/rackforge-program-api" }
+rackforge-surface-api = { path = "rackforge/crates/rackforge-surface-api" }

@@ -1,0 +1,12 @@
+# Every RackForge plugin component is built with SIMD. The RackForge SDK does
+# not compile for wasm32-unknown-unknown without it, and every RackForge host
+# executes it: wasmtime on desktop, Raspberry Pi and Android, and every browser
+# since 2021. Without it LLVM vectorises nothing -- on the Concert Grand that
+# is 58 per cent of native speed against 74. See "Building a fast component"
+# in RackForge's docs/PLUGIN_DEVELOPMENT.md.
+#
+# This file is part of the repository. A local override of the SDK for
+# adjacent development does not go here; see .cargo/config.toml.example.
+
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
